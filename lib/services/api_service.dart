@@ -7,7 +7,8 @@ class ApiService {
   // LOCAL BACKEND
   // ============================================================
 
-  static const String baseUrl = 'http://192.168.1.11:5000/api';
+  static const String baseUrl =
+    'https://supervisor-management-backend.onrender.com/api';
 
   //============================================================
   // COMMON HELPERS
