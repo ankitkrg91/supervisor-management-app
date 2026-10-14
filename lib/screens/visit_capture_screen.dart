@@ -3,13 +3,11 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 
 class VisitCaptureScreen extends StatefulWidget {
   final String siteName;
   final String siteCode;
-
   const VisitCaptureScreen({
     super.key,
     required this.siteName,
@@ -21,66 +19,46 @@ class VisitCaptureScreen extends StatefulWidget {
 }
 
 class _VisitCaptureScreenState extends State<VisitCaptureScreen> {
-  // ============================================================
-  // PUT YOUR GOOGLE APPS SCRIPT WEB APP URL HERE
-  // ============================================================
-
-static const String appsScriptUrl =
-      'https://script.google.com/macros/s/AKfycbyhMb46Rjbe98HzdGzCZ2U2F5kDkSREqDZyjbq_lz_w_5HKjyEKNyFkiLmtX9Jc3ePZQw/exec';
-
   final ImagePicker _picker = ImagePicker();
-
-  File? _photo;
-
+  File? _namePlatePhoto;
+  File? _selfiePhoto;
+  File? _sitePhoto;
   Position? _position;
-
   bool _loadingLocation = false;
-  bool _uploading = false;
-
+  bool _processing = false;
   String _error = '';
 
-  // ============================================================
-  // PICK PHOTO FROM CAMERA
-  // ============================================================
-
-  Future<void> _takePhoto() async {
-    try {
-      setState(() {
-        _error = '';
-      });
-
-      final XFile? image = await _picker.pickImage(
-        source: ImageSource.camera,
-        imageQuality: 70,
-        maxWidth: 1600,
-        maxHeight: 1600,
-      );
-
-      if (image == null) {
-        return;
-      }
-
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        _photo = File(image.path);
-      });
-    } catch (e) {
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        _error = 'Unable to open camera: $e';
-      });
-    }
+  @override
+  void initState() {
+    super.initState();
+    _getLocation();
   }
 
-  // ============================================================
-  // GET CURRENT GPS
-  // ============================================================
+  Future<void> _takePhoto(String type) async {
+    try {
+      setState(() => _error = '');
+      final XFile? image = await _picker.pickImage(
+        source: ImageSource.camera,
+        imageQuality: 55,
+        maxWidth: 1024,
+        maxHeight: 1024,
+        preferredCameraDevice: type == 'SELFIE'
+            ? CameraDevice.front
+            : CameraDevice.rear,
+      );
+      if (image == null || !mounted) return;
+      setState(() {
+        if (type == 'NAMEPLATE')
+          _namePlatePhoto = File(image.path);
+        else if (type == 'SELFIE')
+          _selfiePhoto = File(image.path);
+        else
+          _sitePhoto = File(image.path);
+      });
+    } catch (e) {
+      if (mounted) setState(() => _error = 'Unable to capture photo: $e');
+    }
+  }
 
   Future<void> _getLocation() async {
     try {
@@ -88,675 +66,304 @@ static const String appsScriptUrl =
         _loadingLocation = true;
         _error = '';
       });
-
-      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
-
-      if (!serviceEnabled) {
+      if (!await Geolocator.isLocationServiceEnabled()) {
         throw Exception('Location service is disabled. Please enable GPS.');
       }
-
-      LocationPermission permission = await Geolocator.checkPermission();
-
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
-
-      if (permission == LocationPermission.denied) {
+      LocationPermission perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied)
+        perm = await Geolocator.requestPermission();
+      if (perm == LocationPermission.denied ||
+          perm == LocationPermission.deniedForever) {
         throw Exception('Location permission denied.');
       }
-
-      if (permission == LocationPermission.deniedForever) {
-        throw Exception(
-          'Location permission permanently denied. Please enable it from phone settings.',
-        );
-      }
-
-      final position =
-          await Geolocator.getCurrentPosition(
-            locationSettings: const LocationSettings(
-              accuracy: LocationAccuracy.high,
-            ),
-          ).timeout(
-            const Duration(seconds: 15),
-            onTimeout: () {
-              throw Exception('Unable to get current GPS location.');
-            },
-          );
-
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        _position = position;
-      });
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+        ),
+      ).timeout(const Duration(seconds: 15));
+      if (mounted) setState(() => _position = pos);
     } catch (e) {
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        _error = e.toString().replaceFirst('Exception: ', '');
-      });
+      if (mounted)
+        setState(() => _error = e.toString().replaceFirst('Exception: ', ''));
     } finally {
-      if (mounted) {
-        setState(() {
-          _loadingLocation = false;
-        });
-      }
+      if (mounted) setState(() => _loadingLocation = false);
     }
   }
 
-  // ============================================================
-  // VALIDATION
-  // ============================================================
-
-  bool _validate() {
-    if (_photo == null) {
-      setState(() {
-        _error = 'Please take a site photo first.';
-      });
-
-      return false;
-    }
-
-    if (_position == null) {
-      setState(() {
-        _error = 'Please capture your GPS location first.';
-      });
-
-      return false;
-    }
-
-    if (appsScriptUrl.trim().isEmpty ||
-        appsScriptUrl.contains('PASTE_YOUR_GOOGLE')) {
-      setState(() {
-        _error = 'Google Apps Script URL is not configured.';
-      });
-
-      return false;
-    }
-
-    return true;
-  }
-
-  // ============================================================
-  // UPLOAD PHOTO TO GOOGLE APPS SCRIPT
-  // HANDLES GOOGLE'S 302 REDIRECT
-  // ============================================================
-
-  Future<Map<String, dynamic>?> _uploadPhotoToGoogleDrive() async {
-    final photo = _photo;
-
-    if (photo == null) {
-      return null;
-    }
-
-    try {
-      final bytes = await photo.readAsBytes();
-
-      final base64Image = base64Encode(bytes);
-
-      final uploadId =
-          'visit_${DateTime.now().millisecondsSinceEpoch}_'
-          '${DateTime.now().microsecondsSinceEpoch}';
-
-      final fileName = 'visit_${DateTime.now().millisecondsSinceEpoch}.jpg';
-
-      final uri = Uri.parse(appsScriptUrl);
-
-      /*
-     * ========================================================
-     * STEP 1
-     * POST PHOTO
-     *
-     * We do NOT depend on the POST response because
-     * Google Apps Script may return HTTP 302.
-     * ========================================================
-     */
-
-      try {
-        await http
-            .post(
-              uri,
-
-              headers: {'Content-Type': 'application/json'},
-
-              body: jsonEncode({
-                'action': 'uploadVisitPhoto',
-
-                'uploadId': uploadId,
-
-                'fileName': fileName,
-
-                'mimeType': 'image/jpeg',
-
-                'imageBase64': base64Image,
-
-                'siteCode': widget.siteCode,
-
-                'siteName': widget.siteName,
-              }),
-            )
-            .timeout(const Duration(seconds: 60));
-      } catch (_) {
-        /*
-       * Ignore the POST response/redirect error here.
-       *
-       * The Apps Script may already have created the
-       * Google Drive file.
-       *
-       * We will retrieve the result using uploadId.
-       */
-      }
-
-      /*
-     * ========================================================
-     * STEP 2
-     * WAIT AND ASK APPS SCRIPT FOR RESULT
-     * ========================================================
-     */
-
-      Map<String, dynamic>? result;
-
-      for (int attempt = 0; attempt < 6; attempt++) {
-        await Future.delayed(Duration(milliseconds: attempt == 0 ? 700 : 1000));
-
-        try {
-          final lookupUri = uri.replace(
-            queryParameters: {'uploadId': uploadId},
-          );
-
-          final lookupResponse = await http
-              .get(lookupUri)
-              .timeout(const Duration(seconds: 20));
-
-          if (lookupResponse.statusCode < 200 ||
-              lookupResponse.statusCode >= 300) {
-            continue;
-          }
-
-          final body = lookupResponse.body.trim();
-
-          if (body.isEmpty) {
-            continue;
-          }
-
-          dynamic decoded;
-
-          try {
-            decoded = jsonDecode(body);
-          } catch (_) {
-            continue;
-          }
-
-          if (decoded is! Map) {
-            continue;
-          }
-
-          final data = Map<String, dynamic>.from(decoded);
-
-          if (data['success'] == true) {
-            result = data;
-
-            break;
-          }
-        } catch (_) {
-          continue;
-        }
-      }
-
-      /*
-     * ========================================================
-     * STEP 3
-     * FINAL RESULT
-     * ========================================================
-     */
-
-      if (result == null) {
-        throw Exception(
-          'Google Drive upload completed, but upload result could not be retrieved.',
-        );
-      }
-
-      final photoUrl = result['photoUrl']?.toString().trim();
-
-      final photoFileId = result['fileId']?.toString().trim();
-
-      if (photoUrl == null || photoUrl.isEmpty) {
-        throw Exception('Google Drive photo URL was not returned.');
-      }
-
-      return {
-        'success': true,
-
-        'photoUrl': photoUrl,
-
-        'photoFileId': photoFileId ?? '',
-
-        'fileId': photoFileId ?? '',
-
-        'thumbnailUrl': result['thumbnailUrl']?.toString().trim() ?? '',
-      };
-    } catch (e) {
-      throw Exception(e.toString().replaceFirst('Exception: ', ''));
-    }
-  }
-  // ============================================================
-  // SUBMIT
-  // ============================================================
-
-  Future<void> _submit() async {
-    if (_uploading) {
-      return;
-    }
-
-    if (!_validate()) {
-      return;
-    }
+  Future<void> _proceedToAudit() async {
+    if (_namePlatePhoto == null)
+      return setState(() => _error = 'Please capture Client Name Plate Photo.');
+    if (_selfiePhoto == null)
+      return setState(() => _error = 'Please capture Supervisor Selfie.');
+    if (_sitePhoto == null)
+      return setState(() => _error = 'Please capture Photo 1 (Site Entrance).');
+    if (_position == null)
+      return setState(() => _error = 'Please verify GPS location.');
 
     try {
       setState(() {
-        _uploading = true;
+        _processing = true;
         _error = '';
       });
-
-      final uploadResult = await _uploadPhotoToGoogleDrive();
-
-      if (uploadResult == null) {
-        throw Exception('Photo upload failed.');
-      }
-
-      final photoUrl = uploadResult['photoUrl']?.toString();
-
-      final photoFileId = uploadResult['fileId']?.toString();
-
-      if (photoUrl == null || photoUrl.trim().isEmpty) {
-        throw Exception('Photo URL was not returned.');
-      }
-
-      if (!mounted) {
-        return;
-      }
-
+      final npB64 =
+          'data:image/jpeg;base64,${base64Encode(await _namePlatePhoto!.readAsBytes())}';
+      final sfB64 =
+          'data:image/jpeg;base64,${base64Encode(await _selfiePhoto!.readAsBytes())}';
+      final stB64 =
+          'data:image/jpeg;base64,${base64Encode(await _sitePhoto!.readAsBytes())}';
+      if (!mounted) return;
       Navigator.of(context).pop({
-        'photoUrl': photoUrl.trim(),
-
-        'photoFileId': photoFileId,
-
+        'namePlatePhoto': npB64,
+        'selfiePhoto': sfB64,
+        'sitePhoto': stB64,
+        'photoUrl': stB64,
+        'photoFileId': 'EVIDENCE_${DateTime.now().millisecondsSinceEpoch}',
         'latitude': _position!.latitude,
-
         'longitude': _position!.longitude,
       });
     } catch (e) {
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        _error = e.toString().replaceFirst('Exception: ', '');
-      });
-    } finally {
-      if (mounted) {
+      if (mounted)
         setState(() {
-          _uploading = false;
+          _processing = false;
+          _error = 'Failed to process photos: $e';
         });
-      }
     }
   }
 
-  // ============================================================
-  // BUILD
-  // ============================================================
+  Widget _buildPhotoSlot(
+    String title,
+    String sub,
+    File? file,
+    VoidCallback onTap,
+    IconData icon,
+  ) {
+    final ok = file != null;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: ok ? const Color(0xFFA7F3D0) : const Color(0xFFE5E7EB),
+          width: ok ? 1.5 : 1,
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 68,
+            height: 68,
+            decoration: BoxDecoration(
+              color: const Color(0xFFF3F4F6),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: const Color(0xFFD1D5DB)),
+            ),
+            child: ok
+                ? ClipRRect(
+                    borderRadius: BorderRadius.circular(9),
+                    child: Image.file(file, fit: BoxFit.cover),
+                  )
+                : Icon(icon, size: 28, color: const Color(0xFF9CA3AF)),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF111827),
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  ok ? 'Photo Captured ✓' : sub,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: ok
+                        ? const Color(0xFF059669)
+                        : const Color(0xFF6B7280),
+                    fontWeight: ok ? FontWeight.bold : FontWeight.normal,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          ElevatedButton(
+            onPressed: onTap,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: ok
+                  ? const Color(0xFFEFF6FF)
+                  : const Color(0xFF2563EB),
+              foregroundColor: ok ? const Color(0xFF2563EB) : Colors.white,
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+            child: Text(
+              ok ? 'Retake' : 'Capture',
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
-    final latitude = _position?.latitude;
-
-    final longitude = _position?.longitude;
-
     return Scaffold(
-      backgroundColor: const Color(0xFFF5F7FB),
-
+      backgroundColor: const Color(0xFFF3F4F6),
       appBar: AppBar(
-        backgroundColor: Colors.white,
-
-        surfaceTintColor: Colors.white,
-
-        elevation: 0,
-
+        backgroundColor: const Color(0xFF1E3A8A),
+        foregroundColor: Colors.white,
         title: const Text(
-          'Submit Site Visit',
-          style: TextStyle(
-            color: Color(0xFF111827),
-            fontWeight: FontWeight.w700,
-          ),
+          'Site Evidence Photos (3 Required)',
+          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17),
         ),
       ),
-
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(16),
-
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-
-            children: [
-              // ==================================================
-              // SITE
-              // ==================================================
-
-              Container(
-                width: double.infinity,
-
-                padding: const EdgeInsets.all(16),
-
-                decoration: BoxDecoration(
-                  color: Colors.white,
-
-                  borderRadius: BorderRadius.circular(16),
-
-                  border: Border.all(color: const Color(0xFFE5E7EB)),
-                ),
-
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-
-                  children: [
-                    const Text(
-                      'Visit Site',
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: Color(0xFF6B7280),
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-
-                    const SizedBox(height: 5),
-
-                    Text(
-                      widget.siteName.trim().isNotEmpty
-                          ? widget.siteName
-                          : 'Site',
-
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w800,
-                        color: Color(0xFF111827),
-                      ),
-                    ),
-
-                    if (widget.siteCode.trim().isNotEmpty) ...[
-                      const SizedBox(height: 4),
-
-                      Text(
-                        widget.siteCode,
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: Color(0xFF6B7280),
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ],
-                  ],
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: const Color(0xFFEFF6FF),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFFBFDBFE)),
+              ),
+              child: Text(
+                '${widget.siteName} ${widget.siteCode.isNotEmpty ? "(${widget.siteCode})" : ""}',
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF1E3A8A),
                 ),
               ),
-
-              const SizedBox(height: 16),
-
-              // ==================================================
-              // PHOTO
-              // ==================================================
+            ),
+            const SizedBox(height: 14),
+            if (_error.isNotEmpty)
               Container(
                 width: double.infinity,
-
-                padding: const EdgeInsets.all(16),
-
+                margin: const EdgeInsets.only(bottom: 12),
+                padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: Colors.white,
-
-                  borderRadius: BorderRadius.circular(16),
-
-                  border: Border.all(color: const Color(0xFFE5E7EB)),
+                  color: const Color(0xFFFEF2F2),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: const Color(0xFFFCA5A5)),
                 ),
-
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-
-                  children: [
-                    const Text(
-                      'Site Photo',
+                child: Text(
+                  _error,
+                  style: const TextStyle(
+                    color: Color(0xFFB91C1C),
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+            _buildPhotoSlot(
+              'CLIENT NAME PLATE PHOTO',
+              'Branch / office sign board',
+              _namePlatePhoto,
+              () => _takePhoto('NAMEPLATE'),
+              Icons.badge_outlined,
+            ),
+            _buildPhotoSlot(
+              'SELFIE',
+              'Front camera supervisor selfie',
+              _selfiePhoto,
+              () => _takePhoto('SELFIE'),
+              Icons.person_outline,
+            ),
+            _buildPhotoSlot(
+              'PHOTO 1 (SITE ENTRANCE)',
+              'Site entrance / overview photo',
+              _sitePhoto,
+              () => _takePhoto('SITE'),
+              Icons.camera_alt_outlined,
+            ),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFFE5E7EB)),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.location_on,
+                    color: _position != null
+                        ? const Color(0xFF059669)
+                        : Colors.grey,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _loadingLocation
+                          ? 'Fetching GPS...'
+                          : (_position != null
+                                ? 'GPS Verified: ${_position!.latitude.toStringAsFixed(5)}, ${_position!.longitude.toStringAsFixed(5)}'
+                                : 'GPS not acquired'),
                       style: TextStyle(
-                        fontSize: 17,
-                        fontWeight: FontWeight.w800,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: _position != null
+                            ? const Color(0xFF059669)
+                            : Colors.black54,
                       ),
                     ),
-
-                    const SizedBox(height: 12),
-
-                    if (_photo != null)
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(14),
-
-                        child: Image.file(
-                          _photo!,
-                          height: 300,
-                          width: double.infinity,
-                          fit: BoxFit.cover,
+                  ),
+                  IconButton(
+                    icon: const Icon(
+                      Icons.refresh,
+                      size: 20,
+                      color: Color(0xFF2563EB),
+                    ),
+                    onPressed: _getLocation,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+            SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: ElevatedButton(
+                onPressed: _processing ? null : _proceedToAudit,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF2563EB),
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                child: _processing
+                    ? const SizedBox(
+                        width: 22,
+                        height: 22,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2.5,
+                          color: Colors.white,
                         ),
                       )
-                    else
-                      Container(
-                        height: 220,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFF3F4F6),
-                          borderRadius: BorderRadius.circular(14),
-                        ),
-                        child: const Center(
-                          child: Icon(
-                            Icons.photo_camera_outlined,
-                            size: 60,
-                            color: Color(0xFF9CA3AF),
-                          ),
+                    : const Text(
+                        'PROCEED TO AUDIT CHECKLIST',
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
                         ),
                       ),
-
-                    const SizedBox(height: 14),
-
-                    ElevatedButton.icon(
-                      onPressed: _uploading ? null : _takePhoto,
-
-                      icon: const Icon(Icons.photo_camera),
-
-                      label: Text(
-                        _photo == null ? 'Take Site Photo' : 'Retake Photo',
-                      ),
-
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF2563EB),
-                        foregroundColor: Colors.white,
-                        minimumSize: const Size(double.infinity, 52),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
               ),
-
-              const SizedBox(height: 16),
-
-              // ==================================================
-              // GPS
-              // ==================================================
-              Container(
-                width: double.infinity,
-
-                padding: const EdgeInsets.all(16),
-
-                decoration: BoxDecoration(
-                  color: Colors.white,
-
-                  borderRadius: BorderRadius.circular(16),
-
-                  border: Border.all(color: const Color(0xFFE5E7EB)),
-                ),
-
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-
-                  children: [
-                    const Text(
-                      'GPS Location',
-                      style: TextStyle(
-                        fontSize: 17,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-
-                    const SizedBox(height: 12),
-
-                    Container(
-                      padding: const EdgeInsets.all(14),
-
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFF8FAFC),
-
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-
-                        children: [
-                          const Icon(
-                            Icons.location_on_outlined,
-                            color: Color(0xFF2563EB),
-                          ),
-
-                          const SizedBox(width: 10),
-
-                          Expanded(
-                            child: _position == null
-                                ? const Text(
-                                    'GPS location not captured.',
-                                    style: TextStyle(color: Color(0xFF6B7280)),
-                                  )
-                                : Text(
-                                    'Latitude: ${latitude!.toStringAsFixed(6)}\n'
-                                    'Longitude: ${longitude!.toStringAsFixed(6)}',
-
-                                    style: const TextStyle(
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                          ),
-                        ],
-                      ),
-                    ),
-
-                    const SizedBox(height: 14),
-
-                    OutlinedButton.icon(
-                      onPressed: _loadingLocation || _uploading
-                          ? null
-                          : _getLocation,
-
-                      icon: _loadingLocation
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.my_location),
-
-                      label: Text(
-                        _position == null
-                            ? 'Capture Current GPS'
-                            : 'Refresh GPS',
-                      ),
-
-                      style: OutlinedButton.styleFrom(
-                        minimumSize: const Size(double.infinity, 50),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-              const SizedBox(height: 16),
-
-              // ==================================================
-              // ERROR
-              // ==================================================
-              if (_error.trim().isNotEmpty)
-                Container(
-                  width: double.infinity,
-
-                  margin: const EdgeInsets.only(bottom: 16),
-
-                  padding: const EdgeInsets.all(14),
-
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFFF1F2),
-
-                    borderRadius: BorderRadius.circular(12),
-
-                    border: Border.all(color: const Color(0xFFFECACA)),
-                  ),
-
-                  child: Text(
-                    _error,
-                    style: const TextStyle(
-                      color: Color(0xFFB91C1C),
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-
-              // ==================================================
-              // SUBMIT
-              // ==================================================
-              SizedBox(
-                width: double.infinity,
-
-                height: 54,
-
-                child: ElevatedButton.icon(
-                  onPressed: _uploading ? null : _submit,
-
-                  icon: _uploading
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
-                        )
-                      : const Icon(Icons.cloud_upload_outlined),
-
-                  label: Text(
-                    _uploading ? 'Uploading...' : 'Upload & Submit Visit',
-                  ),
-
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF16A34A),
-                    foregroundColor: Colors.white,
-
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );

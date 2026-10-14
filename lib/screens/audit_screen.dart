@@ -1,7 +1,10 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:image_picker/image_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../services/api_service.dart';
 
@@ -10,6 +13,8 @@ class AuditScreen extends StatefulWidget {
   final String accessToken;
   final String title;
   final String? clientName;
+  final String? clientMobile;
+  final String? supervisorName;
   final String? siteName;
   final String? siteCode;
 
@@ -19,6 +24,8 @@ class AuditScreen extends StatefulWidget {
     required this.accessToken,
     this.title = 'MSF',
     this.clientName,
+    this.clientMobile,
+    this.supervisorName,
     this.siteName,
     this.siteCode,
   });
@@ -31,15 +38,17 @@ class _AuditScreenState extends State<AuditScreen> {
   bool _loading = true;
   bool _submitting = false;
   bool _submitted = false;
-
   String _errorMessage = '';
-
   String? _templateId;
   String _templateName = '';
-
   List<Map<String, dynamic>> _questions = [];
-
   final Map<String, bool> _answers = {};
+  final Map<String, List<String>> _questionPhotos = {};
+  final ImagePicker _picker = ImagePicker();
+
+  // LIVE RENDER SERVER DOMAIN (Works on every phone via internet)
+  static const String _publicWebBaseUrl =
+      'https://supervisor-management-backend.onrender.com';
 
   @override
   void initState() {
@@ -47,9 +56,33 @@ class _AuditScreenState extends State<AuditScreen> {
     _loadChecklist();
   }
 
-  // ==========================================================
-  // LOAD CHECKLIST FROM BACKEND
-  // ==========================================================
+  bool _isPhotoRequired(Map<String, dynamic> q) {
+    if (q['requiresPhoto'] == true || q['photo'] == true) return true;
+    final t = (q['question'] ?? q['text'] ?? '').toString().toUpperCase();
+    for (final kw in [
+      'TURNOUT',
+      'UNIFORM',
+      'GROOMING',
+      'APP',
+      'LOBBY',
+      'PANTRY',
+      'WASH',
+      'CABIN',
+      'REGISTER',
+      'CHECKLIST',
+      'TRAINING',
+      'PHOTO',
+      'ROOM',
+      'HOUSEKEEPING',
+      'AREA',
+      'CLEAN',
+      'FIRE',
+      'SECURITY',
+    ]) {
+      if (t.contains(kw)) return true;
+    }
+    return false;
+  }
 
   Future<void> _loadChecklist() async {
     try {
@@ -57,197 +90,248 @@ class _AuditScreenState extends State<AuditScreen> {
         _loading = true;
         _errorMessage = '';
       });
-
-      final response = await http.get(
+      final res = await http.get(
         Uri.parse('${ApiService.baseUrl}/audit/checklist'),
         headers: {
           'Authorization': 'Bearer ${widget.accessToken}',
           'Content-Type': 'application/json',
         },
       );
-
-      final data = _decodeResponse(response);
-
-      if (response.statusCode == 401) {
-        throw Exception(
-          data['message'] ?? 'Session expired. Please login again.',
-        );
-      }
-
-      if (response.statusCode < 200 || response.statusCode >= 300) {
+      final data = _decodeResponse(res);
+      if (res.statusCode < 200 || res.statusCode >= 300) {
         throw Exception(data['message'] ?? 'Failed to load audit checklist.');
       }
-
       final checklist = data['data']?['checklist'] ?? data['checklist'];
-
-      if (checklist == null) {
-        throw Exception('Audit checklist was not found.');
-      }
-
+      if (checklist == null) throw Exception('Audit checklist not found.');
       final rawQuestions = checklist['questions'];
-
-      final List<Map<String, dynamic>> activeQuestions = [];
-
+      final List<Map<String, dynamic>> active = [];
       if (rawQuestions is List) {
         for (final item in rawQuestions) {
-          if (item is Map<String, dynamic>) {
-            if (item['isActive'] != false) {
-              activeQuestions.add(Map<String, dynamic>.from(item));
-            }
+          if (item is Map<String, dynamic> && item['isActive'] != false) {
+            active.add(Map<String, dynamic>.from(item));
           }
         }
       }
-
-      activeQuestions.sort(
+      active.sort(
         (a, b) => (int.tryParse('${a['questionNo']}') ?? 0).compareTo(
           int.tryParse('${b['questionNo']}') ?? 0,
         ),
       );
-
-      if (!mounted) {
-        return;
+      for (int i = 0; i < active.length; i++) {
+        active[i]['displayNo'] = i + 1;
+        active[i]['questionNo'] = i + 1;
       }
-
+      if (!mounted) return;
       setState(() {
         _templateId = checklist['id']?.toString();
-
         _templateName = checklist['name']?.toString() ?? widget.title;
-
-        _questions = activeQuestions;
+        _questions = active;
         _loading = false;
       });
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-
+    } catch (e) {
+      if (!mounted) return;
       setState(() {
         _loading = false;
-
-        _errorMessage = error.toString().replaceFirst('Exception: ', '');
+        _errorMessage = e.toString().replaceFirst('Exception: ', '');
       });
     }
   }
 
-  // ==========================================================
-  // RESPONSE DECODER
-  // ==========================================================
-
-  Map<String, dynamic> _decodeResponse(http.Response response) {
+  Map<String, dynamic> _decodeResponse(http.Response r) {
     try {
-      final decoded = jsonDecode(response.body);
-
-      if (decoded is Map<String, dynamic>) {
-        return decoded;
-      }
-
-      return {};
+      final d = jsonDecode(r.body);
+      return d is Map<String, dynamic> ? d : {};
     } catch (_) {
       return {};
     }
   }
 
-  // ==========================================================
-  // SELECT ANSWER
-  // ==========================================================
-
-  void _selectAnswer(String questionId, bool value) {
-    if (_submitted || _submitting) {
-      return;
-    }
-
+  Future<void> _selectAnswer(Map<String, dynamic> question, bool value) async {
+    if (_submitted || _submitting) return;
+    final qId = question['id']?.toString() ?? '';
+    if (qId.isEmpty) return;
     setState(() {
-      _answers[questionId] = value;
+      _answers[qId] = value;
       _errorMessage = '';
+    });
+    final existing = _questionPhotos[qId] ?? [];
+    if (value == true && _isPhotoRequired(question) && existing.isEmpty) {
+      await _capturePhoto(
+        qId,
+        question['question']?.toString() ?? 'Checkpoint',
+      );
+    }
+  }
+
+  Future<void> _capturePhoto(String questionId, String title) async {
+    try {
+      final XFile? photo = await _picker.pickImage(
+        source: ImageSource.camera,
+        imageQuality: 55,
+        maxWidth: 1024,
+        maxHeight: 1024,
+      );
+      if (photo != null && mounted) {
+        setState(() {
+          _questionPhotos.putIfAbsent(questionId, () => []).add(photo.path);
+          _answers[questionId] = true;
+          _errorMessage = '';
+        });
+      }
+    } catch (e) {
+      _showMessage('Failed to capture photo: $e', isError: true);
+    }
+  }
+
+  void _removePhoto(String questionId, int index) {
+    setState(() {
+      _questionPhotos[questionId]?.removeAt(index);
+      if (_questionPhotos[questionId]?.isEmpty ?? false) {
+        _questionPhotos.remove(questionId);
+      }
     });
   }
 
-  // ==========================================================
-  // VALIDATE ANSWERS
-  // ==========================================================
-
   String? _validateAnswers() {
-    for (final question in _questions) {
-      final questionId = question['id']?.toString();
-
-      if (questionId == null || questionId.isEmpty) {
-        continue;
-      }
-
-      final isRequired = question['isRequired'] != false;
-
-      if (isRequired && !_answers.containsKey(questionId)) {
-        final questionNo = question['questionNo']?.toString() ?? '';
-
-        return questionNo.isNotEmpty
-            ? 'Please answer question $questionNo.'
-            : 'Please answer all required questions.';
+    for (int i = 0; i < _questions.length; i++) {
+      final q = _questions[i];
+      final qId = q['id']?.toString() ?? '';
+      if (qId.isEmpty) continue;
+      if (q['isRequired'] != false && !_answers.containsKey(qId)) {
+        return 'Please answer Question Q${i + 1}.';
       }
     }
-
     return null;
   }
 
-  // ==========================================================
-  // SUBMIT AUDIT
-  // ==========================================================
+  Future<String?> _promptClientPhoneDialog() async {
+    final ctrl = TextEditingController(text: widget.clientMobile ?? '');
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text(
+          'Client WhatsApp Number',
+          style: TextStyle(fontSize: 17),
+        ),
+        content: TextField(
+          controller: ctrl,
+          keyboardType: TextInputType.phone,
+          autofocus: true,
+          decoration: const InputDecoration(
+            prefixText: '+91 ',
+            hintText: 'Enter 10-digit number',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(null),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(ctrl.text.trim()),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF25D366),
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Open WhatsApp'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _sendWhatsAppReport() async {
+    final siteCode = widget.siteCode ?? '';
+    final siteName = widget.siteName ?? 'Client Site';
+    final sup = (widget.supervisorName ?? '').isNotEmpty
+        ? widget.supervisorName!
+        : 'SUPERVISOR';
+
+    final auditUrl = '$_publicWebBaseUrl/audit-view/${widget.visitId}';
+    final fbUrl = '$_publicWebBaseUrl/feedback/${widget.visitId}';
+
+    final msg =
+        'The Site: $siteCode $siteName has been visited by Operation Executive $sup.\n\n'
+        'Click to view audit report: $auditUrl\n'
+        'Share feedback: $fbUrl';
+
+    String rawPhone = (widget.clientMobile ?? '').replaceAll(
+      RegExp(r'[^0-9]'),
+      '',
+    );
+    if (rawPhone.length < 10) {
+      final input = await _promptClientPhoneDialog();
+      if (input != null && input.isNotEmpty) {
+        rawPhone = input.replaceAll(RegExp(r'[^0-9]'), '');
+      }
+    }
+
+    final phoneParam = rawPhone.length == 10
+        ? '91$rawPhone'
+        : (rawPhone.length > 10 ? rawPhone : '');
+
+    final enc = Uri.encodeComponent(msg);
+    final appUri = phoneParam.isNotEmpty
+        ? Uri.parse('whatsapp://send?phone=$phoneParam&text=$enc')
+        : Uri.parse('whatsapp://send?text=$enc');
+
+    final webUri = phoneParam.isNotEmpty
+        ? Uri.parse('https://api.whatsapp.com/send?phone=$phoneParam&text=$enc')
+        : Uri.parse('https://api.whatsapp.com/send?text=$enc');
+
+    try {
+      if (!await launchUrl(appUri, mode: LaunchMode.externalApplication)) {
+        await launchUrl(webUri, mode: LaunchMode.externalApplication);
+      }
+    } catch (_) {
+      await launchUrl(webUri, mode: LaunchMode.externalApplication);
+    }
+  }
 
   Future<void> _submitAudit() async {
-    if (_submitted || _submitting) {
-      return;
-    }
-
+    if (_submitted || _submitting) return;
     if (_templateId == null || _templateId!.isEmpty) {
-      setState(() {
-        _errorMessage = 'Audit template is not available.';
-      });
-
+      return setState(() => _errorMessage = 'Audit template missing.');
+    }
+    final err = _validateAnswers();
+    if (err != null) {
+      setState(() => _errorMessage = err);
+      _showMessage(err, isError: true);
       return;
     }
 
-    if (widget.visitId.trim().isEmpty) {
-      setState(() {
-        _errorMessage = 'Visit ID is missing.';
+    final List<Map<String, dynamic>> answersPayload = [];
+    for (final q in _questions) {
+      final qId = q['id']?.toString();
+      if (qId == null || !_answers.containsKey(qId)) continue;
+      final paths = _questionPhotos[qId] ?? [];
+      final List<String> b64List = [];
+      for (final p in paths) {
+        try {
+          final f = File(p);
+          if (await f.exists()) {
+            b64List.add(
+              'data:image/jpeg;base64,${base64Encode(await f.readAsBytes())}',
+            );
+          }
+        } catch (_) {}
+      }
+      answersPayload.add({
+        'questionId': qId,
+        'booleanValue': _answers[qId],
+        'textValue': b64List.isNotEmpty ? jsonEncode(b64List) : null,
+        'photos': b64List,
       });
-
-      return;
     }
-
-    final validationError = _validateAnswers();
-
-    if (validationError != null) {
-      setState(() {
-        _errorMessage = validationError;
-      });
-
-      _showMessage(validationError, isError: true);
-
-      return;
-    }
-
-    final answersPayload = _questions
-        .where(
-          (question) =>
-              question['id'] != null &&
-              _answers.containsKey(question['id'].toString()),
-        )
-        .map((question) {
-          final questionId = question['id'].toString();
-
-          return {
-            'questionId': questionId,
-            'booleanValue': _answers[questionId],
-          };
-        })
-        .toList();
 
     try {
       setState(() {
         _submitting = true;
         _errorMessage = '';
       });
-
-      final response = await http.post(
+      final res = await http.post(
         Uri.parse(
           '${ApiService.baseUrl}/audit/visits/${widget.visitId}/submit',
         ),
@@ -260,638 +344,414 @@ class _AuditScreenState extends State<AuditScreen> {
           'answers': answersPayload,
         }),
       );
-
-      final data = _decodeResponse(response);
-
-      if (response.statusCode == 401) {
-        throw Exception(
-          data['message'] ?? 'Session expired. Please login again.',
-        );
-      }
-
-      if (response.statusCode < 200 || response.statusCode >= 300) {
+      final data = _decodeResponse(res);
+      if (res.statusCode < 200 || res.statusCode >= 300) {
         throw Exception(data['message'] ?? 'Failed to submit audit.');
       }
-
-      if (!mounted) {
-        return;
-      }
-
+      if (!mounted) return;
       setState(() {
         _submitting = false;
         _submitted = true;
       });
 
-      await _showSuccessDialog();
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
+      await _sendWhatsAppReport();
 
-      final message = error.toString().replaceFirst('Exception: ', '');
-
-      setState(() {
-        _submitting = false;
-        _errorMessage = message;
-      });
-
-      _showMessage(message, isError: true);
-    }
-  }
-
-  // ==========================================================
-  // SUCCESS DIALOG
-  // ==========================================================
-
-  Future<void> _showSuccessDialog() async {
-    await showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (dialogContext) {
-        return AlertDialog(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(18),
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dCtx) => AlertDialog(
+          title: const Text('Audit Submitted'),
+          content: const Text(
+            'Your site audit and photos have been saved. Please proceed to Check-Out.',
           ),
-          title: const Row(
-            children: [
-              Icon(Icons.check_circle, color: Colors.green, size: 28),
-              SizedBox(width: 10),
-              Text('Audit Submitted'),
-            ],
-          ),
-          content: const Text('The audit has been submitted successfully.'),
           actions: [
+            TextButton(
+              onPressed: _sendWhatsAppReport,
+              child: const Text('Resend WhatsApp'),
+            ),
             ElevatedButton(
               onPressed: () {
-                Navigator.of(dialogContext).pop();
+                Navigator.of(dCtx).pop();
+                Navigator.of(context).pop(true);
               },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF1F4FD8),
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10),
-                ),
-              ),
-              child: const Text('Done'),
+              child: const Text('Proceed to Check-Out'),
             ),
           ],
-        );
-      },
-    );
-
-    if (!mounted) {
-      return;
-    }
-
-    // Return TRUE to MyTasksScreen.
-    // MyTasksScreen will then:
-    // 1. Mark task COMPLETED
-    // 2. Refresh task list
-    // 3. Open task-site CHECK-OUT
-    Navigator.of(context).pop(true);
-  }
-
-  // ==========================================================
-  // SNACKBAR
-  // ==========================================================
-
-  void _showMessage(String message, {required bool isError}) {
-    if (!mounted) {
-      return;
-    }
-
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: Text(message),
-          backgroundColor: isError
-              ? Colors.red.shade700
-              : Colors.green.shade700,
-          behavior: SnackBarBehavior.floating,
-          margin: const EdgeInsets.all(16),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
         ),
       );
-  }
-
-  // ==========================================================
-  // PROGRESS
-  // ==========================================================
-
-  int get _answeredCount {
-    return _answers.length;
-  }
-
-  int get _requiredQuestionCount {
-    return _questions
-        .where((question) => question['isRequired'] != false)
-        .length;
-  }
-
-  double get _progressValue {
-    if (_requiredQuestionCount == 0) {
-      return 0;
+    } catch (e) {
+      if (!mounted) return;
+      final msg = e.toString().replaceFirst('Exception: ', '');
+      setState(() {
+        _submitting = false;
+        _errorMessage = msg;
+      });
+      _showMessage(msg, isError: true);
     }
-
-    final answeredRequired = _questions.where((question) {
-      final id = question['id']?.toString();
-
-      return question['isRequired'] != false &&
-          id != null &&
-          _answers.containsKey(id);
-    }).length;
-
-    return answeredRequired / _requiredQuestionCount;
   }
 
-  // ==========================================================
-  // QUESTION CARD
-  // ==========================================================
+  void _showMessage(String msg, {bool isError = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: isError ? Colors.red.shade700 : Colors.green.shade700,
+      ),
+    );
+  }
 
-  Widget _buildQuestionCard(Map<String, dynamic> question) {
-    final questionId = question['id']?.toString() ?? '';
-
-    final questionNo = question['questionNo']?.toString() ?? '';
-
-    final questionText = question['question']?.toString() ?? '';
-
-    final isRequired = question['isRequired'] != false;
-
-    final selected = _answers[questionId];
+  Widget _buildQuestionCard(Map<String, dynamic> question, int index) {
+    final qId = question['id']?.toString() ?? '';
+    final displayNo = '${index + 1}';
+    final text =
+        question['question']?.toString() ?? question['text']?.toString() ?? '';
+    final selected = _answers[qId];
+    final reqPhoto = _isPhotoRequired(question);
+    final paths = _questionPhotos[qId] ?? [];
 
     return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      padding: const EdgeInsets.fromLTRB(16, 18, 16, 16),
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.grey.shade300, width: 1),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.04),
-            blurRadius: 10,
-            offset: const Offset(0, 3),
-          ),
-        ],
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: selected != null
+              ? const Color(0xFFC7D7FE)
+              : const Color(0xFFE4E7EC),
+          width: selected != null ? 1.5 : 1,
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Expanded(
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFEFF4FF),
+                  borderRadius: BorderRadius.circular(6),
+                ),
                 child: Text(
-                  '$questionNo. $questionText',
+                  'Q$displayNo',
                   style: const TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xFF202124),
-                    height: 1.35,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF1D4ED8),
+                    fontSize: 12,
                   ),
                 ),
               ),
-              if (isRequired)
+              const SizedBox(width: 8),
+              if (reqPhoto || selected == true || paths.isNotEmpty)
                 Container(
-                  margin: const EdgeInsets.only(left: 8, top: 2),
                   padding: const EdgeInsets.symmetric(
                     horizontal: 8,
                     vertical: 4,
                   ),
                   decoration: BoxDecoration(
-                    color: const Color(0xFFFFF0F0),
-                    borderRadius: BorderRadius.circular(8),
+                    color: paths.isNotEmpty
+                        ? const Color(0xFFECFDF5)
+                        : const Color(0xFFFFFBEB),
+                    borderRadius: BorderRadius.circular(6),
                   ),
-                  child: const Text(
-                    'Required',
+                  child: Text(
+                    paths.isNotEmpty
+                        ? '${paths.length} Photo(s) Attached'
+                        : 'Attach Photo',
                     style: TextStyle(
-                      color: Colors.red,
                       fontSize: 11,
                       fontWeight: FontWeight.w600,
+                      color: paths.isNotEmpty
+                          ? const Color(0xFF059669)
+                          : const Color(0xFFD97706),
                     ),
                   ),
                 ),
             ],
           ),
-          const SizedBox(height: 16),
-
-          // YES
-          SizedBox(
-            width: double.infinity,
-            height: 56,
-            child: _buildAnswerButton(
-              label: 'YES',
-              selected: selected == true,
-              activeColor: const Color(0xFF16B63A),
-              onTap: () {
-                _selectAnswer(questionId, true);
-              },
-            ),
-          ),
-
           const SizedBox(height: 10),
-
-          // NO
-          SizedBox(
-            width: double.infinity,
-            height: 56,
-            child: _buildAnswerButton(
-              label: 'NO',
-              selected: selected == false,
-              activeColor: const Color(0xFFE53935),
-              onTap: () {
-                _selectAnswer(questionId, false);
-              },
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ==========================================================
-  // ANSWER BUTTON
-  // ==========================================================
-
-  Widget _buildAnswerButton({
-    required String label,
-    required bool selected,
-    required Color activeColor,
-    required VoidCallback onTap,
-  }) {
-    final backgroundColor = selected ? activeColor : Colors.white;
-
-    final textColor = selected ? Colors.white : const Color(0xFF3C4043);
-
-    final borderColor = selected ? activeColor : const Color(0xFFB9BEC7);
-
-    return ElevatedButton(
-      onPressed: (_submitted || _submitting) ? null : onTap,
-      style: ElevatedButton.styleFrom(
-        elevation: selected ? 1 : 0,
-        backgroundColor: backgroundColor,
-        foregroundColor: textColor,
-        disabledBackgroundColor: backgroundColor,
-        disabledForegroundColor: textColor,
-        side: BorderSide(color: borderColor, width: 1.2),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          if (selected) const Icon(Icons.check, size: 21),
-          if (selected) const SizedBox(width: 8),
           Text(
-            label,
-            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ==========================================================
-  // HEADER INFO
-  // ==========================================================
-
-  Widget _buildHeaderInfo() {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(18),
-      margin: const EdgeInsets.fromLTRB(16, 16, 16, 10),
-      decoration: BoxDecoration(
-        color: const Color(0xFFEFF4FF),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFFD7E2FF)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            _templateName.isNotEmpty ? _templateName : widget.title,
+            text,
             style: const TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.w700,
-              color: Color(0xFF1A3E94),
+              fontSize: 15,
+              fontWeight: FontWeight.w600,
+              color: Color(0xFF1F2937),
             ),
           ),
-
-          if ((widget.siteCode ?? '').isNotEmpty) ...[
-            const SizedBox(height: 7),
-            Text(
-              'Site: ${widget.siteCode}',
-              style: const TextStyle(
-                fontSize: 14,
-                color: Color(0xFF4F5B70),
-                fontWeight: FontWeight.w500,
+          if (reqPhoto || selected == true || paths.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            if (paths.isNotEmpty)
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (int i = 0; i < paths.length; i++)
+                    Stack(
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: Image.file(
+                            File(paths[i]),
+                            width: 68,
+                            height: 68,
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                        Positioned(
+                          top: 2,
+                          right: 2,
+                          child: InkWell(
+                            onTap: () => _removePhoto(qId, i),
+                            child: Container(
+                              padding: const EdgeInsets.all(2),
+                              decoration: const BoxDecoration(
+                                color: Colors.red,
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(
+                                Icons.close,
+                                size: 12,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  InkWell(
+                    onTap: () => _capturePhoto(qId, text),
+                    child: Container(
+                      width: 68,
+                      height: 68,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFEFF6FF),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: const Color(0xFFBFDBFE)),
+                      ),
+                      child: const Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            Icons.add_a_photo,
+                            size: 20,
+                            color: Color(0xFF2563EB),
+                          ),
+                          SizedBox(height: 3),
+                          Text(
+                            '+ Add',
+                            style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF2563EB),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              )
+            else
+              OutlinedButton.icon(
+                onPressed: () => _capturePhoto(qId, text),
+                icon: const Icon(
+                  Icons.camera_alt,
+                  size: 16,
+                  color: Color(0xFF2563EB),
+                ),
+                label: const Text(
+                  'Capture Photo',
+                  style: TextStyle(color: Color(0xFF2563EB), fontSize: 13),
+                ),
               ),
-            ),
           ],
-
-          if ((widget.siteName ?? '').isNotEmpty) ...[
-            const SizedBox(height: 4),
-            Text(
-              widget.siteName!,
-              style: const TextStyle(fontSize: 14, color: Color(0xFF4F5B70)),
-            ),
-          ],
-
-          if ((widget.clientName ?? '').isNotEmpty) ...[
-            const SizedBox(height: 4),
-            Text(
-              'Client: ${widget.clientName}',
-              style: const TextStyle(fontSize: 14, color: Color(0xFF4F5B70)),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  // ==========================================================
-  // PROGRESS BAR
-  // ==========================================================
-
-  Widget _buildProgressSection() {
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.fromLTRB(16, 4, 16, 16),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.grey.shade300),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
+          const SizedBox(height: 14),
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text(
-                'Audit Progress',
-                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: (_submitted || _submitting)
+                      ? null
+                      : () => _selectAnswer(question, true),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: selected == true
+                        ? const Color(0xFF16A34A)
+                        : Colors.white,
+                    foregroundColor: selected == true
+                        ? Colors.white
+                        : const Color(0xFF374151),
+                    side: BorderSide(
+                      color: selected == true
+                          ? const Color(0xFF16A34A)
+                          : const Color(0xFFD1D5DB),
+                    ),
+                  ),
+                  child: const Text(
+                    'YES',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
               ),
-              Text(
-                '$_answeredCount/${_questions.length}',
-                style: const TextStyle(
-                  fontSize: 14,
-                  color: Color(0xFF5F6368),
-                  fontWeight: FontWeight.w600,
+              const SizedBox(width: 12),
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: (_submitted || _submitting)
+                      ? null
+                      : () => _selectAnswer(question, false),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: selected == false
+                        ? const Color(0xFFDC2626)
+                        : Colors.white,
+                    foregroundColor: selected == false
+                        ? Colors.white
+                        : const Color(0xFF374151),
+                    side: BorderSide(
+                      color: selected == false
+                          ? const Color(0xFFDC2626)
+                          : const Color(0xFFD1D5DB),
+                    ),
+                  ),
+                  child: const Text(
+                    'NO',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
                 ),
               ),
             ],
           ),
-
-          const SizedBox(height: 10),
-
-          ClipRRect(
-            borderRadius: BorderRadius.circular(10),
-            child: LinearProgressIndicator(
-              minHeight: 8,
-              value: _progressValue.clamp(0.0, 1.0),
-              backgroundColor: const Color(0xFFE4E7EC),
-              valueColor: const AlwaysStoppedAnimation<Color>(
-                Color(0xFF2F67E8),
-              ),
-            ),
-          ),
         ],
       ),
     );
   }
-
-  // ==========================================================
-  // EMPTY STATE
-  // ==========================================================
-
-  Widget _buildEmptyState() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.assignment_outlined,
-              size: 64,
-              color: Colors.grey.shade400,
-            ),
-
-            const SizedBox(height: 16),
-
-            const Text(
-              'No audit questions available',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-            ),
-
-            const SizedBox(height: 8),
-
-            Text(
-              'Please ask the administrator to add audit questions.',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
-            ),
-
-            const SizedBox(height: 18),
-
-            OutlinedButton.icon(
-              onPressed: _loadChecklist,
-              icon: const Icon(Icons.refresh),
-              label: const Text('Refresh'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // ==========================================================
-  // ERROR STATE
-  // ==========================================================
-
-  Widget _buildErrorState() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(28),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.error_outline, size: 58, color: Colors.red.shade400),
-
-            const SizedBox(height: 16),
-
-            const Text(
-              'Unable to load audit',
-              style: TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
-            ),
-
-            const SizedBox(height: 8),
-
-            Text(
-              _errorMessage,
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 14, color: Colors.grey.shade700),
-            ),
-
-            const SizedBox(height: 18),
-
-            ElevatedButton.icon(
-              onPressed: _loadChecklist,
-              icon: const Icon(Icons.refresh),
-              label: const Text('Try Again'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // ==========================================================
-  // SUBMIT BUTTON
-  // ==========================================================
-
-  Widget _buildSubmitButton() {
-    return SafeArea(
-      top: false,
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          boxShadow: [
-            BoxShadow(
-              color: Color.fromRGBO(0, 0, 0, 0.10),
-              blurRadius: 12,
-              offset: Offset(0, -3),
-            ),
-          ],
-        ),
-        child: SizedBox(
-          height: 56,
-          width: double.infinity,
-          child: ElevatedButton(
-            onPressed: (_submitting || _submitted) ? null : _submitAudit,
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF2F5BEA),
-              foregroundColor: Colors.white,
-              disabledBackgroundColor: const Color(0xFF9AA7C2),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-              elevation: 1,
-            ),
-            child: _submitting
-                ? const SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2.5,
-                      color: Colors.white,
-                    ),
-                  )
-                : Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Icon(Icons.send, size: 20),
-                      const SizedBox(width: 8),
-                      Text(
-                        _submitted ? 'SUBMITTED' : 'SUBMIT',
-                        style: const TextStyle(
-                          fontSize: 17,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ],
-                  ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  // ==========================================================
-  // BUILD
-  // ==========================================================
 
   @override
   Widget build(BuildContext context) {
+    final total = _questions.length;
+    final answered = _answers.length;
+    final progress = total > 0 ? answered / total : 0.0;
+
     return Scaffold(
-      backgroundColor: const Color(0xFFF5F7FB),
+      backgroundColor: const Color(0xFFF3F4F6),
       appBar: AppBar(
-        backgroundColor: const Color(0xFF4B4FE8),
+        backgroundColor: const Color(0xFF1E3A8A),
         foregroundColor: Colors.white,
-        elevation: 0,
         title: Text(
           widget.title,
-          style: const TextStyle(fontWeight: FontWeight.w600),
-        ),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () {
-            Navigator.of(context).pop();
-          },
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
         ),
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : _errorMessage.isNotEmpty && _questions.isEmpty
-          ? _buildErrorState()
-          : _questions.isEmpty
-          ? _buildEmptyState()
           : Column(
               children: [
                 Expanded(
                   child: RefreshIndicator(
                     onRefresh: _loadChecklist,
                     child: ListView(
-                      padding: const EdgeInsets.only(top: 0, bottom: 12),
+                      padding: const EdgeInsets.only(bottom: 16),
                       children: [
-                        _buildHeaderInfo(),
-                        _buildProgressSection(),
-
-                        if (_errorMessage.isNotEmpty)
-                          Container(
-                            margin: const EdgeInsets.fromLTRB(16, 0, 16, 14),
-                            padding: const EdgeInsets.all(14),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFFFF1F1),
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(
-                                color: const Color(0xFFFFC9C9),
-                              ),
-                            ),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Icon(
-                                  Icons.error_outline,
-                                  color: Colors.red,
-                                ),
-                                const SizedBox(width: 10),
-                                Expanded(
-                                  child: Text(
-                                    _errorMessage,
+                        Container(
+                          margin: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Column(
+                            children: [
+                              Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Text(
+                                    'Progress: $answered / $total Completed',
                                     style: const TextStyle(
-                                      color: Color(0xFFB42318),
-                                      fontSize: 14,
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w600,
                                     ),
                                   ),
-                                ),
-                              ],
+                                  Text(
+                                    '${(progress * 100).toInt()}%',
+                                    style: const TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.bold,
+                                      color: Color(0xFF2563EB),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              LinearProgressIndicator(
+                                value: progress,
+                                color: const Color(0xFF2563EB),
+                                minHeight: 6,
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (_errorMessage.isNotEmpty)
+                          Container(
+                            margin: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 6,
+                            ),
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFEF2F2),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              _errorMessage,
+                              style: const TextStyle(
+                                color: Color(0xFFB91C1C),
+                                fontSize: 13,
+                              ),
                             ),
                           ),
-
-                        ..._questions.map(_buildQuestionCard),
+                        for (int i = 0; i < _questions.length; i++)
+                          _buildQuestionCard(_questions[i], i),
                       ],
                     ),
                   ),
                 ),
-
-                _buildSubmitButton(),
+                SafeArea(
+                  top: false,
+                  child: Container(
+                    padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+                    color: Colors.white,
+                    child: SizedBox(
+                      height: 50,
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: (_submitting || _submitted)
+                            ? null
+                            : _submitAudit,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF2563EB),
+                          foregroundColor: Colors.white,
+                        ),
+                        child: _submitting
+                            ? const SizedBox(
+                                width: 22,
+                                height: 22,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2.5,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Text(
+                                'SUBMIT AUDIT & SEND WHATSAPP REPORT',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                      ),
+                    ),
+                  ),
+                ),
               ],
             ),
     );

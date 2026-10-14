@@ -9,58 +9,37 @@ import 'api_service.dart';
 
 class LocationTrackingService {
   static StreamSubscription<Position>? _positionSubscription;
-
+  static Timer? _periodicTimer;
   static String? _accessToken;
-
   static bool _started = false;
-
   static DateTime? _lastUploadedAt;
-
-  static const Duration _uploadInterval = Duration(seconds: 30);
-
+  static const Duration _uploadInterval = Duration(seconds: 15);
   static final Battery _battery = Battery();
 
   static Future<bool> start({required String accessToken}) async {
-    if (_started) {
-      return true;
-    }
-
+    if (_started) return true;
     _accessToken = accessToken;
 
     try {
       final serviceEnabled = await Geolocator.isLocationServiceEnabled();
-
-      if (!serviceEnabled) {
-        return false;
-      }
+      if (!serviceEnabled) return false;
 
       LocationPermission permission = await Geolocator.checkPermission();
-
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
       }
-
       if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
         return false;
       }
 
-      final androidSettings = AndroidSettings(
+      const locationSettings = LocationSettings(
         accuracy: LocationAccuracy.high,
         distanceFilter: 0,
-        intervalDuration: const Duration(seconds: 30),
-        foregroundNotificationConfig: ForegroundNotificationConfig(
-          notificationTitle: 'Supervisor Tracking',
-          notificationText: 'Your location is being updated.',
-          notificationChannelName: 'Supervisor Location Tracking',
-          setOngoing: true,
-          enableWakeLock: false,
-          enableWifiLock: false,
-        ),
       );
 
       _positionSubscription =
-          Geolocator.getPositionStream(locationSettings: androidSettings)
+          Geolocator.getPositionStream(locationSettings: locationSettings)
               .listen(
                 (Position position) async {
                   await _handlePosition(position);
@@ -69,13 +48,22 @@ class LocationTrackingService {
                 cancelOnError: false,
               );
 
+      _periodicTimer?.cancel();
+      _periodicTimer = Timer.periodic(_uploadInterval, (_) async {
+        try {
+          final pos = await Geolocator.getCurrentPosition(
+            locationSettings: locationSettings,
+          );
+          await _handlePosition(pos, force: true);
+        } catch (_) {}
+      });
+
       _started = true;
 
       try {
         final position = await Geolocator.getCurrentPosition(
-          locationSettings: androidSettings,
+          locationSettings: locationSettings,
         );
-
         await _handlePosition(position, force: true);
       } catch (_) {}
 
@@ -89,89 +77,48 @@ class LocationTrackingService {
     Position position, {
     bool force = false,
   }) async {
-    if (_accessToken == null || _accessToken!.isEmpty) {
-      return;
-    }
+    final token = _accessToken;
+    if (token == null || token.isEmpty) return;
 
     final now = DateTime.now();
-
     if (!force &&
         _lastUploadedAt != null &&
         now.difference(_lastUploadedAt!) < _uploadInterval) {
       return;
     }
 
-    final int batteryLevel = await _getBatteryLevel();
+    _lastUploadedAt = now;
 
-    final uploaded = await _uploadLocation(
-      latitude: position.latitude,
-      longitude: position.longitude,
-      batteryLevel: batteryLevel,
-    );
-
-    if (uploaded) {
-      _lastUploadedAt = now;
-    }
-  }
-
-  static Future<int> _getBatteryLevel() async {
+    int? batteryPercentage;
     try {
-      final level = await _battery.batteryLevel;
-
-      return level.clamp(0, 100).toInt();
+      batteryPercentage = await _battery.batteryLevel;
     } catch (_) {
-      return 0;
-    }
-  }
-
-  static Future<bool> _uploadLocation({
-    required double latitude,
-    required double longitude,
-    required int batteryLevel,
-  }) async {
-    final token = _accessToken;
-
-    if (token == null || token.isEmpty) {
-      return false;
+      batteryPercentage = null;
     }
 
     try {
-      final response = await http.post(
+      await http.post(
         Uri.parse('${ApiService.baseUrl}/location'),
         headers: {
-          'Content-Type': 'application/json',
           'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
         },
         body: jsonEncode({
-          'latitude': latitude,
-          'longitude': longitude,
-          'batteryLevel': batteryLevel,
+          'latitude': position.latitude,
+          'longitude': position.longitude,
+          'batteryPercentage': batteryPercentage,
         }),
       );
-
-      if (response.statusCode >= 200 && response.statusCode < 300) {
-        return true;
-      }
-
-      return false;
-    } catch (_) {
-      return false;
-    }
+    } catch (_) {}
   }
 
   static Future<void> stop() async {
     await _positionSubscription?.cancel();
-
     _positionSubscription = null;
-
-    _accessToken = null;
-
-    _lastUploadedAt = null;
-
+    _periodicTimer?.cancel();
+    _periodicTimer = null;
     _started = false;
-  }
-
-  static bool get isRunning {
-    return _started;
+    _accessToken = null;
+    _lastUploadedAt = null;
   }
 }

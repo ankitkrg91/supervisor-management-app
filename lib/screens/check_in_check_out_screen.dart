@@ -10,6 +10,8 @@ class CheckInCheckOutScreen extends StatefulWidget {
   final String? taskSiteId;
   final String? taskSiteName;
   final String? taskSiteCode;
+  final double? taskSiteLatitude;
+  final double? taskSiteLongitude;
 
   final bool returnAfterCheckIn;
 
@@ -20,6 +22,8 @@ class CheckInCheckOutScreen extends StatefulWidget {
     this.taskSiteId,
     this.taskSiteName,
     this.taskSiteCode,
+    this.taskSiteLatitude,
+    this.taskSiteLongitude,
     this.returnAfterCheckIn = false,
   });
 
@@ -140,30 +144,6 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
   }
 
   // ============================================================
-  // CHECK-IN SITE ID
-  // ============================================================
-
-  String _checkInSiteId(Map<String, dynamic> checkIn) {
-    final directId = checkIn['siteId']?.toString().trim();
-
-    if (directId != null && directId.isNotEmpty) {
-      return directId;
-    }
-
-    final site = checkIn['site'];
-
-    if (site is Map) {
-      final nestedId = site['id']?.toString().trim();
-
-      if (nestedId != null && nestedId.isNotEmpty) {
-        return nestedId;
-      }
-    }
-
-    return '';
-  }
-  
-  // ============================================================
   // CURRENT LOCATION
   // ============================================================
 
@@ -208,7 +188,7 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
   // LOAD ATTENDANCE
   // ============================================================
 
-Future<void> _loadAttendance() async {
+  Future<void> _loadAttendance() async {
     try {
       if (mounted) {
         setState(() {
@@ -216,10 +196,6 @@ Future<void> _loadAttendance() async {
           _error = '';
         });
       }
-
-      // ----------------------------------------------------------
-      // ONLY CHECK ATTENDANCE FOR THIS TASK SITE
-      // ----------------------------------------------------------
 
       final siteId = _taskSiteId();
 
@@ -286,10 +262,6 @@ Future<void> _loadAttendance() async {
         _attendanceLoading = false;
       });
 
-      // ----------------------------------------------------------
-      // ALREADY CHECKED IN FOR THIS TASK SITE
-      // ----------------------------------------------------------
-
       if (widget.returnAfterCheckIn && active != null) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) {
@@ -309,10 +281,6 @@ Future<void> _loadAttendance() async {
     }
   }
 
-  // ============================================================
-  // CLEAN ERROR
-  // ============================================================
-
   String _cleanError(Object error) {
     var message = error.toString().trim();
 
@@ -322,10 +290,6 @@ Future<void> _loadAttendance() async {
 
     return message.isEmpty ? 'Something went wrong.' : message;
   }
-
-  // ============================================================
-  // RESPONSE MESSAGE
-  // ============================================================
 
   String _responseMessage(Map<String, dynamic> response, String fallback) {
     final message = response['message']?.toString().trim();
@@ -354,10 +318,10 @@ Future<void> _loadAttendance() async {
   }
 
   // ============================================================
-  // CHECK-IN
+  // DIRECT CHECK-IN (GPS ONLY, NO CAMERA POPUP)
   // ============================================================
 
-Future<void> _checkIn() async {
+  Future<void> _checkIn() async {
     if (_processing) {
       return;
     }
@@ -376,6 +340,32 @@ Future<void> _checkIn() async {
       });
 
       final position = await _getCurrentLocation();
+
+      // Enforce 100-meter geofence if site coordinates are provided
+      final targetLat = widget.taskSiteLatitude;
+      final targetLng = widget.taskSiteLongitude;
+
+      if (targetLat != null && targetLng != null) {
+        final distanceMeters = Geolocator.distanceBetween(
+          position.latitude,
+          position.longitude,
+          targetLat,
+          targetLng,
+        );
+
+        if (distanceMeters > 100) {
+          final roundedDist = distanceMeters.round();
+          final siteName = _taskSiteName();
+          setState(() {
+            _processing = false;
+          });
+          _showMessage(
+            "Check-in is only allowed within 100 meters of the site. You are currently ${roundedDist}m away from $siteName.",
+            isError: true,
+          );
+          return;
+        }
+      }
 
       final response = await ApiService.createCheckIn(
         accessToken: widget.accessToken,
@@ -401,17 +391,13 @@ Future<void> _checkIn() async {
         _processing = false;
       });
 
-      // ----------------------------------------------------------
-      // RETURN TO AUDIT
-      // ----------------------------------------------------------
-
       if (widget.returnAfterCheckIn) {
         Navigator.of(context).pop(true);
         return;
       }
 
       _showMessage(
-        response['message'] ?? 'Check-in successful',
+        response['message'] ?? 'Check-in successful!',
         isError: false,
       );
     } catch (e) {
@@ -426,6 +412,7 @@ Future<void> _checkIn() async {
       _showMessage(e.toString().replaceFirst('Exception: ', ''), isError: true);
     }
   }
+
   // ============================================================
   // CHECK-OUT
   // ============================================================
@@ -459,8 +446,6 @@ Future<void> _checkIn() async {
         _error = '';
       });
 
-      debugPrint('CHECK-IN SCREEN: Checking out $checkInId');
-
       final position = await _getCurrentLocation();
 
       final response =
@@ -473,13 +458,10 @@ Future<void> _checkIn() async {
             const Duration(seconds: 15),
             onTimeout: () {
               throw Exception(
-                'Check-out request timed out. '
-                'Please check that the backend is running.',
+                'Check-out request timed out. Please check backend connection.',
               );
             },
           );
-
-      debugPrint('CHECK-IN SCREEN: checkOut response = $response');
 
       final success = response['success'] == true;
 
@@ -504,21 +486,16 @@ Future<void> _checkIn() async {
         return;
       }
 
-      setState(() {
-        _activeCheckIn = null;
-        _processing = false;
-        _error = '';
-      });
-
-      _showMessage(
-        _responseMessage(response, 'Check-out successful'),
-        isError: false,
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_responseMessage(response, 'Check-out successful')),
+          backgroundColor: const Color(0xFF2E7D32),
+        ),
       );
 
-      await _loadAttendance();
+      Navigator.of(context).pop(true);
+      return;
     } catch (e) {
-      debugPrint('CHECK-IN SCREEN CHECK-OUT ERROR: $e');
-
       if (!mounted) {
         return;
       }
@@ -530,10 +507,6 @@ Future<void> _checkIn() async {
       _showMessage(_cleanError(e), isError: true);
     }
   }
-
-  // ============================================================
-  // MESSAGE
-  // ============================================================
 
   void _showMessage(String message, {required bool isError}) {
     if (!mounted) {
@@ -558,10 +531,6 @@ Future<void> _checkIn() async {
       );
   }
 
-  // ============================================================
-  // FORMAT DATE TIME
-  // ============================================================
-
   String _formatDateTime(dynamic value) {
     if (value == null) {
       return '—';
@@ -574,52 +543,19 @@ Future<void> _checkIn() async {
     }
 
     final local = date.toLocal();
-
     final day = local.day.toString().padLeft(2, '0');
-
     final month = local.month.toString().padLeft(2, '0');
-
     final hour = local.hour % 12 == 0 ? 12 : local.hour % 12;
-
     final minute = local.minute.toString().padLeft(2, '0');
-
     final period = local.hour >= 12 ? 'PM' : 'AM';
 
-    return '$day/$month/${local.year} '
-        '$hour:$minute $period';
+    return '$day/$month/${local.year} $hour:$minute $period';
   }
-
-  // ============================================================
-  // STATUS CARD
-  // ============================================================
 
   Widget _statusCard() {
     final checkedIn = _activeCheckIn != null;
-
-    final taskSiteId = _taskSiteId();
-
-    final activeSite = _activeCheckIn?['site'];
-
-    final activeSiteId = _activeCheckIn != null
-        ? _checkInSiteId(_activeCheckIn!)
-        : '';
-
-    final checkedInAtTaskSite =
-        checkedIn && taskSiteId.isNotEmpty && activeSiteId == taskSiteId;
-
-    final displayedSiteName = checkedIn
-        ? (activeSite is Map
-              ? (activeSite['name']?.toString().trim().isNotEmpty == true
-                    ? activeSite['name'].toString().trim()
-                    : 'Current Site')
-              : 'Current Site')
-        : _taskSiteName();
-
-    final displayedSiteCode = checkedIn
-        ? (activeSite is Map
-              ? (activeSite['siteCode']?.toString().trim() ?? '')
-              : '')
-        : _taskSiteCode();
+    final displayedSiteName = _taskSiteName();
+    final displayedSiteCode = _taskSiteCode();
 
     return Container(
       width: double.infinity,
@@ -675,9 +611,7 @@ Future<void> _checkIn() async {
             _attendanceLoading
                 ? 'Checking Attendance...'
                 : checkedIn
-                ? checkedInAtTaskSite
-                      ? 'You are Checked In'
-                      : 'Already Checked In'
+                ? 'You are Checked In'
                 : 'You are Not Checked In',
             style: const TextStyle(
               fontSize: 20,
@@ -692,9 +626,7 @@ Future<void> _checkIn() async {
             _attendanceLoading
                 ? 'Checking your current check-in status.'
                 : checkedIn
-                ? checkedInAtTaskSite
-                      ? 'Your attendance is active for this task site.'
-                      : 'Check out from the current site before checking in to another site.'
+                ? 'Your attendance is active for this task site.'
                 : 'Check in before starting your field work.',
             textAlign: TextAlign.center,
             style: const TextStyle(fontSize: 13, color: Color(0xFF6B7280)),
@@ -711,11 +643,7 @@ Future<void> _checkIn() async {
             ),
             child: Column(
               children: [
-                _infoRow(
-                  Icons.business_outlined,
-                  checkedIn ? 'Current Site' : 'Task Site',
-                  displayedSiteName,
-                ),
+                _infoRow(Icons.business_outlined, 'Site', displayedSiteName),
 
                 if (displayedSiteCode.isNotEmpty) ...[
                   const SizedBox(height: 10),
@@ -742,24 +670,17 @@ Future<void> _checkIn() async {
     );
   }
 
-  // ============================================================
-  // INFO ROW
-  // ============================================================
-
   Widget _infoRow(IconData icon, String title, String value) {
     return Row(
       children: [
         Icon(icon, size: 19, color: const Color(0xFF6B7280)),
-
         const SizedBox(width: 9),
-
         Expanded(
           child: Text(
             title,
             style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
           ),
         ),
-
         Flexible(
           child: Text(
             value,
@@ -775,13 +696,8 @@ Future<void> _checkIn() async {
     );
   }
 
-  // ============================================================
-  // ACTION BUTTON
-  // ============================================================
-
   Widget _actionButton() {
     final checkedIn = _activeCheckIn != null;
-
     final disabled = _processing || _attendanceLoading;
 
     return SizedBox(
@@ -826,15 +742,10 @@ Future<void> _checkIn() async {
     );
   }
 
-  // ============================================================
-  // BUILD
-  // ============================================================
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFFF5F7FB),
-
       appBar: AppBar(
         backgroundColor: Colors.white,
         surfaceTintColor: Colors.white,
@@ -849,7 +760,6 @@ Future<void> _checkIn() async {
         ),
         iconTheme: const IconThemeData(color: Color(0xFF111827)),
       ),
-
       body: RefreshIndicator(
         onRefresh: _loadAttendance,
         child: SingleChildScrollView(
@@ -858,14 +768,10 @@ Future<void> _checkIn() async {
           child: Column(
             children: [
               _statusCard(),
-
               const SizedBox(height: 18),
-
               _actionButton(),
-
               if (_error.isNotEmpty) ...[
                 const SizedBox(height: 16),
-
                 Container(
                   width: double.infinity,
                   padding: const EdgeInsets.all(12),
@@ -884,9 +790,7 @@ Future<void> _checkIn() async {
                   ),
                 ),
               ],
-
               const SizedBox(height: 18),
-
               Container(
                 width: double.infinity,
                 padding: const EdgeInsets.all(15),

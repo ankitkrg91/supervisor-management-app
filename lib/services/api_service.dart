@@ -7,8 +7,7 @@ class ApiService {
   // LOCAL BACKEND
   // ============================================================
 
-  static const String baseUrl =
-    'https://supervisor-management-backend.onrender.com/api';
+  static const String baseUrl = 'http://10.249.23.234:5000/api';
 
   //============================================================
   // COMMON HELPERS
@@ -185,15 +184,21 @@ class ApiService {
     required String siteId,
     required double latitude,
     required double longitude,
+    String? photoUrl,
   }) async {
+    final body = <String, dynamic>{
+      'siteId': siteId,
+      'latitude': latitude,
+      'longitude': longitude,
+    };
+    if (photoUrl != null && photoUrl.isNotEmpty) {
+      body['photoUrl'] = photoUrl;
+    }
+
     final response = await http.post(
       Uri.parse('$baseUrl/check-ins'),
       headers: _headers(accessToken: accessToken),
-      body: jsonEncode({
-        'siteId': siteId,
-        'latitude': latitude,
-        'longitude': longitude,
-      }),
+      body: jsonEncode(body),
     );
 
     final data = _decodeResponse(response);
