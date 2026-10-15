@@ -106,6 +106,7 @@ class LocationTrackingService {
         body: jsonEncode({
           'latitude': position.latitude,
           'longitude': position.longitude,
+          'batteryLevel': batteryPercentage,
           'batteryPercentage': batteryPercentage,
         }),
       );

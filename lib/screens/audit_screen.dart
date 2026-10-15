@@ -1,9 +1,12 @@
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+// Yeh sahi hai (.dart ke sath):
 import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
+
 import '../services/api_service.dart';
 
 class AuditScreen extends StatefulWidget {
@@ -41,6 +44,7 @@ class _AuditScreenState extends State<AuditScreen> {
   String _templateName = '';
   List<Map<String, dynamic>> _questions = [];
   final Map<String, bool> _answers = {};
+  final Map<String, TextEditingController> _textControllers = {};
   final Map<String, List<String>> _questionPhotos = {};
   final ImagePicker _picker = ImagePicker();
 
@@ -54,13 +58,36 @@ class _AuditScreenState extends State<AuditScreen> {
     _loadChecklist();
   }
 
+  @override
+  void dispose() {
+    for (final controller in _textControllers.values) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
   bool _isPhotoRequired(Map<String, dynamic> q) {
     if (q['requiresPhoto'] == true || q['photo'] == true) return true;
     final t = (q['question'] ?? q['text'] ?? '').toString().toUpperCase();
     for (final kw in [
-      'TURNOUT', 'UNIFORM', 'GROOMING', 'APP', 'LOBBY', 'PANTRY',
-      'WASH', 'CABIN', 'REGISTER', 'CHECKLIST', 'TRAINING', 'PHOTO',
-      'ROOM', 'HOUSEKEEPING', 'AREA', 'CLEAN', 'FIRE', 'SECURITY'
+      'TURNOUT',
+      'UNIFORM',
+      'GROOMING',
+      'APP',
+      'LOBBY',
+      'PANTRY',
+      'WASH',
+      'CABIN',
+      'REGISTER',
+      'CHECKLIST',
+      'TRAINING',
+      'PHOTO',
+      'ROOM',
+      'HOUSEKEEPING',
+      'AREA',
+      'CLEAN',
+      'FIRE',
+      'SECURITY',
     ]) {
       if (t.contains(kw)) return true;
     }
@@ -95,8 +122,11 @@ class _AuditScreenState extends State<AuditScreen> {
           }
         }
       }
-      active.sort((a, b) => (int.tryParse('${a['questionNo']}') ?? 0)
-          .compareTo(int.tryParse('${b['questionNo']}') ?? 0));
+      active.sort(
+        (a, b) => (int.tryParse('${a['questionNo']}') ?? 0).compareTo(
+          int.tryParse('${b['questionNo']}') ?? 0,
+        ),
+      );
       for (int i = 0; i < active.length; i++) {
         active[i]['displayNo'] = i + 1;
         active[i]['questionNo'] = i + 1;
@@ -136,7 +166,10 @@ class _AuditScreenState extends State<AuditScreen> {
     });
     final existing = _questionPhotos[qId] ?? [];
     if (value == true && _isPhotoRequired(question) && existing.isEmpty) {
-      await _capturePhoto(qId, question['question']?.toString() ?? 'Checkpoint');
+      await _capturePhoto(
+        qId,
+        question['question']?.toString() ?? 'Checkpoint',
+      );
     }
   }
 
@@ -174,8 +207,19 @@ class _AuditScreenState extends State<AuditScreen> {
       final q = _questions[i];
       final qId = q['id']?.toString() ?? '';
       if (qId.isEmpty) continue;
-      if (q['isRequired'] != false && !_answers.containsKey(qId)) {
-        return 'Please answer Question Q${i + 1}.';
+      final isText =
+          q['type'] == 'TEXT' || q['type']?.toString().toUpperCase() == 'TEXT';
+      if (q['isRequired'] != false) {
+        if (isText) {
+          final txt = _textControllers[qId]?.text.trim() ?? '';
+          if (txt.isEmpty) {
+            return 'Please answer Question Q${i + 1}.';
+          }
+        } else {
+          if (!_answers.containsKey(qId)) {
+            return 'Please answer Question Q${i + 1}.';
+          }
+        }
       }
     }
     return null;
@@ -199,7 +243,10 @@ class _AuditScreenState extends State<AuditScreen> {
         'Security Operations Centre: 18002021055\n'
         'VINICIA SECURITY SERVICES PVT LTD';
 
-    String rawPhone = (widget.clientMobile ?? '').replaceAll(RegExp(r'[^0-9]'), '');
+    String rawPhone = (widget.clientMobile ?? '').replaceAll(
+      RegExp(r'[^0-9]'),
+      '',
+    );
     if (rawPhone.startsWith('0') && rawPhone.length == 11) {
       rawPhone = rawPhone.substring(1);
     }
@@ -253,23 +300,40 @@ class _AuditScreenState extends State<AuditScreen> {
     final List<Map<String, dynamic>> answersPayload = [];
     for (final q in _questions) {
       final qId = q['id']?.toString();
-      if (qId == null || !_answers.containsKey(qId)) continue;
+      if (qId == null) continue;
+      final isText =
+          q['type'] == 'TEXT' || q['type']?.toString().toUpperCase() == 'TEXT';
       final paths = _questionPhotos[qId] ?? [];
       final List<String> b64List = [];
       for (final p in paths) {
         try {
           final f = File(p);
           if (await f.exists()) {
-            b64List.add('data:image/jpeg;base64,${base64Encode(await f.readAsBytes())}');
+            b64List.add(
+              'data:image/jpeg;base64,${base64Encode(await f.readAsBytes())}',
+            );
           }
         } catch (_) {}
       }
-      answersPayload.add({
-        'questionId': qId,
-        'booleanValue': _answers[qId],
-        'textValue': b64List.isNotEmpty ? jsonEncode(b64List) : null,
-        'photos': b64List,
-      });
+
+      if (isText) {
+        final textAns = _textControllers[qId]?.text.trim() ?? '';
+        if (textAns.isEmpty && q['isRequired'] == false) continue;
+        answersPayload.add({
+          'questionId': qId,
+          'booleanValue': null,
+          'textValue': textAns,
+          'photos': b64List,
+        });
+      } else {
+        if (!_answers.containsKey(qId)) continue;
+        answersPayload.add({
+          'questionId': qId,
+          'booleanValue': _answers[qId],
+          'textValue': b64List.isNotEmpty ? jsonEncode(b64List) : null,
+          'photos': b64List,
+        });
+      }
     }
 
     try {
@@ -278,7 +342,9 @@ class _AuditScreenState extends State<AuditScreen> {
         _errorMessage = '';
       });
       final res = await http.post(
-        Uri.parse('${ApiService.baseUrl}/audit/visits/${widget.visitId}/submit'),
+        Uri.parse(
+          '${ApiService.baseUrl}/audit/visits/${widget.visitId}/submit',
+        ),
         headers: {
           'Authorization': 'Bearer ${widget.accessToken}',
           'Content-Type': 'application/json',
@@ -348,10 +414,18 @@ class _AuditScreenState extends State<AuditScreen> {
   Widget _buildQuestionCard(Map<String, dynamic> question, int index) {
     final qId = question['id']?.toString() ?? '';
     final displayNo = '${index + 1}';
-    final text = question['question']?.toString() ?? question['text']?.toString() ?? '';
+    final text =
+        question['question']?.toString() ?? question['text']?.toString() ?? '';
+    final isText =
+        question['type'] == 'TEXT' ||
+        question['type']?.toString().toUpperCase() == 'TEXT';
     final selected = _answers[qId];
     final reqPhoto = _isPhotoRequired(question);
     final paths = _questionPhotos[qId] ?? [];
+    final textController = isText
+        ? _textControllers.putIfAbsent(qId, () => TextEditingController())
+        : null;
+    final hasText = isText && (textController?.text.trim().isNotEmpty ?? false);
 
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -360,8 +434,10 @@ class _AuditScreenState extends State<AuditScreen> {
         color: Colors.white,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
-          color: selected != null ? const Color(0xFFC7D7FE) : const Color(0xFFE4E7EC),
-          width: selected != null ? 1.5 : 1,
+          color: (selected != null || hasText)
+              ? const Color(0xFFC7D7FE)
+              : const Color(0xFFE4E7EC),
+          width: (selected != null || hasText) ? 1.5 : 1,
         ),
       ),
       child: Column(
@@ -384,10 +460,34 @@ class _AuditScreenState extends State<AuditScreen> {
                   ),
                 ),
               ),
+              if (isText) ...[
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF3E8FF),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: const Text(
+                    'TEXT',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF7E22CE),
+                      fontSize: 11,
+                    ),
+                  ),
+                ),
+              ],
               const SizedBox(width: 8),
               if (reqPhoto || selected == true || paths.isNotEmpty)
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
                   decoration: BoxDecoration(
                     color: paths.isNotEmpty
                         ? const Color(0xFFECFDF5)
@@ -395,7 +495,9 @@ class _AuditScreenState extends State<AuditScreen> {
                     borderRadius: BorderRadius.circular(6),
                   ),
                   child: Text(
-                    paths.isNotEmpty ? '${paths.length} Photo(s) Attached' : 'Attach Photo',
+                    paths.isNotEmpty
+                        ? '${paths.length} Photo(s) Attached'
+                        : 'Attach Photo',
                     style: TextStyle(
                       fontSize: 11,
                       fontWeight: FontWeight.w600,
@@ -446,7 +548,11 @@ class _AuditScreenState extends State<AuditScreen> {
                                 color: Colors.red,
                                 shape: BoxShape.circle,
                               ),
-                              child: const Icon(Icons.close, size: 12, color: Colors.white),
+                              child: const Icon(
+                                Icons.close,
+                                size: 12,
+                                color: Colors.white,
+                              ),
                             ),
                           ),
                         ),
@@ -465,7 +571,11 @@ class _AuditScreenState extends State<AuditScreen> {
                       child: const Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Icon(Icons.add_a_photo, size: 20, color: Color(0xFF2563EB)),
+                          Icon(
+                            Icons.add_a_photo,
+                            size: 20,
+                            color: Color(0xFF2563EB),
+                          ),
                           SizedBox(height: 3),
                           Text(
                             '+ Add',
@@ -484,7 +594,11 @@ class _AuditScreenState extends State<AuditScreen> {
             else
               OutlinedButton.icon(
                 onPressed: () => _capturePhoto(qId, text),
-                icon: const Icon(Icons.camera_alt, size: 16, color: Color(0xFF2563EB)),
+                icon: const Icon(
+                  Icons.camera_alt,
+                  size: 16,
+                  color: Color(0xFF2563EB),
+                ),
                 label: const Text(
                   'Capture Photo',
                   style: TextStyle(color: Color(0xFF2563EB), fontSize: 13),
@@ -492,49 +606,97 @@ class _AuditScreenState extends State<AuditScreen> {
               ),
           ],
           const SizedBox(height: 14),
-          Row(
-            children: [
-              Expanded(
-                child: ElevatedButton(
-                  onPressed: (_submitted || _submitting)
-                      ? null
-                      : () => _selectAnswer(question, true),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor:
-                        selected == true ? const Color(0xFF16A34A) : Colors.white,
-                    foregroundColor:
-                        selected == true ? Colors.white : const Color(0xFF374151),
-                    side: BorderSide(
-                      color: selected == true
+          if (isText)
+            TextField(
+              controller: textController,
+              enabled: !_submitted && !_submitting,
+              maxLines: 3,
+              minLines: 1,
+              onChanged: (_) => setState(() {}),
+              style: const TextStyle(fontSize: 14, color: Color(0xFF1F2937)),
+              decoration: InputDecoration(
+                hintText: 'Enter details / answer here...',
+                hintStyle: const TextStyle(
+                  color: Color(0xFF9CA3AF),
+                  fontSize: 13,
+                ),
+                filled: true,
+                fillColor: const Color(0xFFF9FAFB),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 12,
+                ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: const BorderSide(
+                    color: Color(0xFF2563EB),
+                    width: 1.5,
+                  ),
+                ),
+              ),
+            )
+          else
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: (_submitted || _submitting)
+                        ? null
+                        : () => _selectAnswer(question, true),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: selected == true
                           ? const Color(0xFF16A34A)
-                          : const Color(0xFFD1D5DB),
+                          : Colors.white,
+                      foregroundColor: selected == true
+                          ? Colors.white
+                          : const Color(0xFF374151),
+                      side: BorderSide(
+                        color: selected == true
+                            ? const Color(0xFF16A34A)
+                            : const Color(0xFFD1D5DB),
+                      ),
+                    ),
+                    child: const Text(
+                      'YES',
+                      style: TextStyle(fontWeight: FontWeight.bold),
                     ),
                   ),
-                  child: const Text('YES', style: TextStyle(fontWeight: FontWeight.bold)),
                 ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: ElevatedButton(
-                  onPressed: (_submitted || _submitting)
-                      ? null
-                      : () => _selectAnswer(question, false),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor:
-                        selected == false ? const Color(0xFFDC2626) : Colors.white,
-                    foregroundColor:
-                        selected == false ? Colors.white : const Color(0xFF374151),
-                    side: BorderSide(
-                      color: selected == false
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: (_submitted || _submitting)
+                        ? null
+                        : () => _selectAnswer(question, false),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: selected == false
                           ? const Color(0xFFDC2626)
-                          : const Color(0xFFD1D5DB),
+                          : Colors.white,
+                      foregroundColor: selected == false
+                          ? Colors.white
+                          : const Color(0xFF374151),
+                      side: BorderSide(
+                        color: selected == false
+                            ? const Color(0xFFDC2626)
+                            : const Color(0xFFD1D5DB),
+                      ),
+                    ),
+                    child: const Text(
+                      'NO',
+                      style: TextStyle(fontWeight: FontWeight.bold),
                     ),
                   ),
-                  child: const Text('NO', style: TextStyle(fontWeight: FontWeight.bold)),
                 ),
-              ),
-            ],
-          ),
+              ],
+            ),
         ],
       ),
     );
@@ -543,7 +705,22 @@ class _AuditScreenState extends State<AuditScreen> {
   @override
   Widget build(BuildContext context) {
     final total = _questions.length;
-    final answered = _answers.length;
+    int answeredCount = 0;
+    for (final q in _questions) {
+      final qId = q['id']?.toString() ?? '';
+      final isText =
+          q['type'] == 'TEXT' || q['type']?.toString().toUpperCase() == 'TEXT';
+      if (isText) {
+        if ((_textControllers[qId]?.text.trim() ?? '').isNotEmpty) {
+          answeredCount++;
+        }
+      } else {
+        if (_answers.containsKey(qId)) {
+          answeredCount++;
+        }
+      }
+    }
+    final answered = answeredCount;
     final progress = total > 0 ? answered / total : 0.0;
 
     return Scaffold(
@@ -551,7 +728,10 @@ class _AuditScreenState extends State<AuditScreen> {
       appBar: AppBar(
         backgroundColor: const Color(0xFF1E3A8A),
         foregroundColor: Colors.white,
-        title: Text(widget.title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+        title: Text(
+          widget.title,
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+        ),
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
@@ -573,7 +753,8 @@ class _AuditScreenState extends State<AuditScreen> {
                           child: Column(
                             children: [
                               Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
                                 children: [
                                   Text(
                                     'Progress: $answered / $total Completed',
@@ -603,7 +784,10 @@ class _AuditScreenState extends State<AuditScreen> {
                         ),
                         if (_errorMessage.isNotEmpty)
                           Container(
-                            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                            margin: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 6,
+                            ),
                             padding: const EdgeInsets.all(10),
                             decoration: BoxDecoration(
                               color: const Color(0xFFFEF2F2),
@@ -611,7 +795,10 @@ class _AuditScreenState extends State<AuditScreen> {
                             ),
                             child: Text(
                               _errorMessage,
-                              style: const TextStyle(color: Color(0xFFB91C1C), fontSize: 13),
+                              style: const TextStyle(
+                                color: Color(0xFFB91C1C),
+                                fontSize: 13,
+                              ),
                             ),
                           ),
                         for (int i = 0; i < _questions.length; i++)
@@ -629,7 +816,9 @@ class _AuditScreenState extends State<AuditScreen> {
                       height: 50,
                       width: double.infinity,
                       child: ElevatedButton(
-                        onPressed: (_submitting || _submitted) ? null : _submitAudit,
+                        onPressed: (_submitting || _submitted)
+                            ? null
+                            : _submitAudit,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: const Color(0xFF2563EB),
                           foregroundColor: Colors.white,
