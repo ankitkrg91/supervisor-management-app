@@ -4,10 +4,16 @@ import 'package:http/http.dart' as http;
 
 class ApiService {
   // ============================================================
-  // LOCAL BACKEND
+  // ENVIRONMENT CONFIGURATION (LOCAL TESTING SWITCH)
   // ============================================================
+  // Set isLocalTest = true for local testing, false for live Render.
+  static const bool isLocalTest = true;
 
-  static const String baseUrl = 'http://10.249.23.234:5000/api';
+  static const String _localUrl = 'http://10.250.21.234:5000/api';
+  static const String _liveUrl =
+      'https://supervisor-management-backend.onrender.com/api';
+
+  static String get baseUrl => isLocalTest ? _localUrl : _liveUrl;
 
   //============================================================
   // COMMON HELPERS
@@ -43,19 +49,21 @@ class ApiService {
     http.Response response,
     String fallbackMessage,
   ) {
-    final data = _decodeResponse(response);
+    final decoded = _decodeResponse(response);
 
-    final message = data['message']?.toString();
+    final message = decoded['message']?.toString().trim();
 
-    if (message != null && message.trim().isNotEmpty) {
+    if (message != null && message.isNotEmpty) {
       return Exception(message);
     }
 
-    if (response.statusCode == 401) {
-      return Exception('Session expired. Please login again.');
+    final error = decoded['error']?.toString().trim();
+
+    if (error != null && error.isNotEmpty) {
+      return Exception(error);
     }
 
-    return Exception(fallbackMessage);
+    return Exception('$fallbackMessage (Status code: ${response.statusCode})');
   }
 
   // ============================================================
@@ -69,7 +77,10 @@ class ApiService {
     final response = await http.post(
       Uri.parse('$baseUrl/auth/supervisor-login'),
       headers: _headers(),
-      body: jsonEncode({'email': email.trim(), 'password': password}),
+      body: jsonEncode({
+        'email': email.trim().toLowerCase(),
+        'password': password,
+      }),
     );
 
     final data = _decodeResponse(response);
@@ -82,16 +93,41 @@ class ApiService {
   }
 
   // ============================================================
-  // GET MY TASKS
+  // UPDATE PASSWORD
   // ============================================================
 
-  static Future<Map<String, dynamic>> getMyTasks({
+  static Future<Map<String, dynamic>> updatePassword({
+    required String accessToken,
+    required String currentPassword,
+    required String newPassword,
+  }) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/auth/change-password'),
+      headers: _headers(accessToken: accessToken),
+      body: jsonEncode({
+        'currentPassword': currentPassword,
+        'newPassword': newPassword,
+      }),
+    );
+
+    final data = _decodeResponse(response);
+
+    if (response.statusCode >= 200 && response.statusCode < 300) {
+      return data;
+    }
+
+    throw _apiException(response, 'Password update failed');
+  }
+
+  // ============================================================
+  // GET TASKS
+  // ============================================================
+
+  static Future<Map<String, dynamic>> getTasks({
     required String accessToken,
     int page = 1,
     int limit = 100,
     String? status,
-    String? priority,
-    String? search,
   }) async {
     final queryParameters = <String, String>{
       'page': page.toString(),
@@ -100,14 +136,6 @@ class ApiService {
 
     if (status != null && status.trim().isNotEmpty) {
       queryParameters['status'] = status.trim();
-    }
-
-    if (priority != null && priority.trim().isNotEmpty) {
-      queryParameters['priority'] = priority.trim();
-    }
-
-    if (search != null && search.trim().isNotEmpty) {
-      queryParameters['search'] = search.trim();
     }
 
     final uri = Uri.parse('$baseUrl/tasks')
@@ -124,46 +152,67 @@ class ApiService {
       return data;
     }
 
-    throw _apiException(response, 'Failed to load tasks');
+    throw _apiException(response, 'Failed to fetch tasks');
+  }
+
+  // ============================================================
+  // UPDATE TASK STATUS
+  // ============================================================
+
+  static Future<Map<String, dynamic>> updateTaskStatus({
+    required String accessToken,
+    required String taskId,
+    required String status,
+  }) async {
+    final response = await http.patch(
+      Uri.parse('$baseUrl/tasks/$taskId/status'),
+      headers: _headers(accessToken: accessToken),
+      body: jsonEncode({'status': status.trim()}),
+    );
+
+    final data = _decodeResponse(response);
+
+    if (response.statusCode >= 200 && response.statusCode < 300) {
+      return data;
+    }
+
+    throw _apiException(response, 'Failed to update task status');
   }
 
   // ============================================================
   // CREATE VISIT
-  // PHOTO + GPS + TASK SITE
   // ============================================================
 
   static Future<Map<String, dynamic>> createVisit({
     required String accessToken,
     required String siteId,
-    String? visitAt,
+    required String visitAt,
     String? reportType,
     String? clientName,
     String? branch,
     String? region,
-    required double latitude,
-    required double longitude,
+    double? latitude,
+    double? longitude,
     String? photoUrl,
     String? photoFileId,
     String? notes,
   }) async {
-    final body = <String, dynamic>{
-      'siteId': siteId,
-      'visitAt': visitAt,
-      'reportType': reportType,
-      'clientName': clientName,
-      'branch': branch,
-      'region': region,
-      'latitude': latitude,
-      'longitude': longitude,
-      'photoUrl': photoUrl,
-      'photoFileId': photoFileId,
-      'notes': notes,
-    };
-
     final response = await http.post(
       Uri.parse('$baseUrl/visits'),
       headers: _headers(accessToken: accessToken),
-      body: jsonEncode(body),
+      body: jsonEncode({
+        'siteId': siteId,
+        'visitAt': visitAt,
+        'reportType': reportType,
+        'clientName': clientName,
+        'branch': branch,
+        'region': region,
+        'latitude': latitude,
+        'longitude': longitude,
+        'photoUrl': photoUrl,
+        'photoFileId': photoFileId,
+        'notes': notes,
+      }),
     );
 
     final data = _decodeResponse(response);
@@ -176,7 +225,7 @@ class ApiService {
   }
 
   // ============================================================
-  // CHECK-IN
+  // CHECK-IN (SUPPORTS STANDARD & RAIN/EMERGENCY EXCEPTION)
   // ============================================================
 
   static Future<Map<String, dynamic>> createCheckIn({
@@ -185,11 +234,16 @@ class ApiService {
     required double latitude,
     required double longitude,
     String? photoUrl,
+    bool isAlternate = false,
+    String? alternateReason,
   }) async {
     final body = <String, dynamic>{
       'siteId': siteId,
       'latitude': latitude,
       'longitude': longitude,
+      if (isAlternate) 'isAlternate': true,
+      if (alternateReason != null && alternateReason.trim().isNotEmpty)
+        'alternateReason': alternateReason.trim(),
     };
     if (photoUrl != null && photoUrl.isNotEmpty) {
       body['photoUrl'] = photoUrl;
@@ -244,66 +298,48 @@ class ApiService {
       return data;
     }
 
-    throw _apiException(response, 'Failed to load check-ins');
+    throw _apiException(response, 'Failed to fetch check-ins');
   }
 
   // ============================================================
-  // GET ACTIVE CHECK-IN FOR SITE
+  // GET VISITS HISTORY
   // ============================================================
 
-  static Future<Map<String, dynamic>?> getActiveCheckInForSite({
+  static Future<Map<String, dynamic>> getVisits({
     required String accessToken,
-    required String siteId,
+    int page = 1,
+    int limit = 20,
+    String? from,
+    String? to,
+    String? status,
+    String? search,
   }) async {
-    final data = await getCheckIns(
-      accessToken: accessToken,
-      page: 1,
-      limit: 100,
-      siteId: siteId,
-    );
+    final queryParameters = <String, String>{
+      'page': page.toString(),
+      'limit': limit.toString(),
+    };
 
-    final rawCheckIns = data['data']?['checkIns'] ?? data['checkIns'] ?? [];
-
-    if (rawCheckIns is! List) {
-      return null;
+    if (from != null && from.trim().isNotEmpty) {
+      queryParameters['from'] = from.trim();
     }
 
-    for (final item in rawCheckIns) {
-      if (item is! Map) {
-        continue;
-      }
-
-      final checkIn = Map<String, dynamic>.from(item);
-
-      final status = checkIn['status']?.toString().toUpperCase() ?? '';
-
-      final returnedSiteId =
-          checkIn['siteId']?.toString() ??
-          checkIn['site']?['id']?.toString() ??
-          '';
-
-      final checkOutAt = checkIn['checkOutAt'];
-
-      if (returnedSiteId == siteId &&
-          status == 'CHECKED_IN' &&
-          checkOutAt == null) {
-        return checkIn;
-      }
+    if (to != null && to.trim().isNotEmpty) {
+      queryParameters['to'] = to.trim();
     }
 
-    return null;
-  }
+    if (status != null && status.trim().isNotEmpty) {
+      queryParameters['status'] = status.trim();
+    }
 
-  // ============================================================
-  // GET CHECK-IN BY ID
-  // ============================================================
+    if (search != null && search.trim().isNotEmpty) {
+      queryParameters['search'] = search.trim();
+    }
 
-  static Future<Map<String, dynamic>> getCheckInById({
-    required String accessToken,
-    required String checkInId,
-  }) async {
+    final uri = Uri.parse('$baseUrl/visits')
+        .replace(queryParameters: queryParameters);
+
     final response = await http.get(
-      Uri.parse('$baseUrl/check-ins/$checkInId'),
+      uri,
       headers: _headers(accessToken: accessToken),
     );
 
@@ -313,7 +349,45 @@ class ApiService {
       return data;
     }
 
-    throw _apiException(response, 'Failed to load check-in record');
+    throw _apiException(response, 'Failed to fetch visits history');
+  }
+
+  // ============================================================
+  // GET ACTIVE CHECK-IN FOR USER
+  // ============================================================
+
+  static Future<Map<String, dynamic>?> getActiveCheckIn({
+    required String accessToken,
+  }) async {
+    final response = await getCheckIns(
+      accessToken: accessToken,
+      page: 1,
+      limit: 10,
+    );
+
+    final data = response['data'];
+
+    List<dynamic> checkIns = [];
+
+    if (data is Map && data['checkIns'] is List) {
+      checkIns = data['checkIns'];
+    } else if (response['checkIns'] is List) {
+      checkIns = response['checkIns'];
+    }
+
+    for (final item in checkIns) {
+      if (item is Map) {
+        final status = item['status']?.toString().toUpperCase();
+
+        final checkOutAt = item['checkOutAt'];
+
+        if (status == 'CHECKED_IN' && checkOutAt == null) {
+          return Map<String, dynamic>.from(item);
+        }
+      }
+    }
+
+    return null;
   }
 
   // ============================================================
@@ -342,7 +416,7 @@ class ApiService {
   }
 
   // ============================================================
-  // GET AUDIT CHECKLIST
+  // AUDIT APIS
   // ============================================================
 
   static Future<Map<String, dynamic>> getAuditChecklist({
@@ -359,34 +433,8 @@ class ApiService {
       return data;
     }
 
-    throw _apiException(response, 'Failed to load audit checklist');
+    throw _apiException(response, 'Failed to fetch audit checklist');
   }
-
-  // ============================================================
-  // GET AUDIT TEMPLATE
-  // ============================================================
-
-  static Future<Map<String, dynamic>> getAuditTemplate({
-    required String accessToken,
-    required String templateId,
-  }) async {
-    final response = await http.get(
-      Uri.parse('$baseUrl/audit/$templateId'),
-      headers: _headers(accessToken: accessToken),
-    );
-
-    final data = _decodeResponse(response);
-
-    if (response.statusCode >= 200 && response.statusCode < 300) {
-      return data;
-    }
-
-    throw _apiException(response, 'Failed to load audit template');
-  }
-
-  // ============================================================
-  // SUBMIT AUDIT
-  // ============================================================
 
   static Future<Map<String, dynamic>> submitAudit({
     required String accessToken,
@@ -407,27 +455,5 @@ class ApiService {
     }
 
     throw _apiException(response, 'Failed to submit audit');
-  }
-
-  // ============================================================
-  // GET AUDIT SUBMISSION
-  // ============================================================
-
-  static Future<Map<String, dynamic>> getAuditSubmission({
-    required String accessToken,
-    required String visitId,
-  }) async {
-    final response = await http.get(
-      Uri.parse('$baseUrl/audit/visits/$visitId/submission'),
-      headers: _headers(accessToken: accessToken),
-    );
-
-    final data = _decodeResponse(response);
-
-    if (response.statusCode >= 200 && response.statusCode < 300) {
-      return data;
-    }
-
-    throw _apiException(response, 'Failed to load audit submission');
   }
 }
