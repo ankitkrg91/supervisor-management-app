@@ -1,11 +1,9 @@
 import 'dart:convert';
 import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
-
 import '../services/api_service.dart';
 
 class AuditScreen extends StatefulWidget {
@@ -46,7 +44,7 @@ class _AuditScreenState extends State<AuditScreen> {
   final Map<String, List<String>> _questionPhotos = {};
   final ImagePicker _picker = ImagePicker();
 
-  // LIVE RENDER SERVER DOMAIN (Works on every phone via internet)
+  // LIVE RENDER SERVER DOMAIN (Accessible on any phone over the internet)
   static const String _publicWebBaseUrl =
       'https://supervisor-management-backend.onrender.com';
 
@@ -60,24 +58,9 @@ class _AuditScreenState extends State<AuditScreen> {
     if (q['requiresPhoto'] == true || q['photo'] == true) return true;
     final t = (q['question'] ?? q['text'] ?? '').toString().toUpperCase();
     for (final kw in [
-      'TURNOUT',
-      'UNIFORM',
-      'GROOMING',
-      'APP',
-      'LOBBY',
-      'PANTRY',
-      'WASH',
-      'CABIN',
-      'REGISTER',
-      'CHECKLIST',
-      'TRAINING',
-      'PHOTO',
-      'ROOM',
-      'HOUSEKEEPING',
-      'AREA',
-      'CLEAN',
-      'FIRE',
-      'SECURITY',
+      'TURNOUT', 'UNIFORM', 'GROOMING', 'APP', 'LOBBY', 'PANTRY',
+      'WASH', 'CABIN', 'REGISTER', 'CHECKLIST', 'TRAINING', 'PHOTO',
+      'ROOM', 'HOUSEKEEPING', 'AREA', 'CLEAN', 'FIRE', 'SECURITY'
     ]) {
       if (t.contains(kw)) return true;
     }
@@ -112,11 +95,8 @@ class _AuditScreenState extends State<AuditScreen> {
           }
         }
       }
-      active.sort(
-        (a, b) => (int.tryParse('${a['questionNo']}') ?? 0).compareTo(
-          int.tryParse('${b['questionNo']}') ?? 0,
-        ),
-      );
+      active.sort((a, b) => (int.tryParse('${a['questionNo']}') ?? 0)
+          .compareTo(int.tryParse('${b['questionNo']}') ?? 0));
       for (int i = 0; i < active.length; i++) {
         active[i]['displayNo'] = i + 1;
         active[i]['questionNo'] = i + 1;
@@ -156,10 +136,7 @@ class _AuditScreenState extends State<AuditScreen> {
     });
     final existing = _questionPhotos[qId] ?? [];
     if (value == true && _isPhotoRequired(question) && existing.isEmpty) {
-      await _capturePhoto(
-        qId,
-        question['question']?.toString() ?? 'Checkpoint',
-      );
+      await _capturePhoto(qId, question['question']?.toString() ?? 'Checkpoint');
     }
   }
 
@@ -204,44 +181,6 @@ class _AuditScreenState extends State<AuditScreen> {
     return null;
   }
 
-  Future<String?> _promptClientPhoneDialog() async {
-    final ctrl = TextEditingController(text: widget.clientMobile ?? '');
-    return showDialog<String>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        title: const Text(
-          'Client WhatsApp Number',
-          style: TextStyle(fontSize: 17),
-        ),
-        content: TextField(
-          controller: ctrl,
-          keyboardType: TextInputType.phone,
-          autofocus: true,
-          decoration: const InputDecoration(
-            prefixText: '+91 ',
-            hintText: 'Enter 10-digit number',
-            border: OutlineInputBorder(),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(null),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.of(ctx).pop(ctrl.text.trim()),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF25D366),
-              foregroundColor: Colors.white,
-            ),
-            child: const Text('Open WhatsApp'),
-          ),
-        ],
-      ),
-    );
-  }
-
   Future<void> _sendWhatsAppReport() async {
     final siteCode = widget.siteCode ?? '';
     final siteName = widget.siteName ?? 'Client Site';
@@ -255,17 +194,14 @@ class _AuditScreenState extends State<AuditScreen> {
     final msg =
         'The Site: $siteCode $siteName has been visited by Operation Executive $sup.\n\n'
         'Click to view audit report: $auditUrl\n'
-        'Share feedback: $fbUrl';
+        'Share feedback: $fbUrl\n\n'
+        'Thanks and regards,\n'
+        'Security Operations Centre: 18002021055\n'
+        'VINICIA SECURITY SERVICES PVT LTD';
 
-    String rawPhone = (widget.clientMobile ?? '').replaceAll(
-      RegExp(r'[^0-9]'),
-      '',
-    );
-    if (rawPhone.length < 10) {
-      final input = await _promptClientPhoneDialog();
-      if (input != null && input.isNotEmpty) {
-        rawPhone = input.replaceAll(RegExp(r'[^0-9]'), '');
-      }
+    String rawPhone = (widget.clientMobile ?? '').replaceAll(RegExp(r'[^0-9]'), '');
+    if (rawPhone.startsWith('0') && rawPhone.length == 11) {
+      rawPhone = rawPhone.substring(1);
     }
 
     final phoneParam = rawPhone.length == 10
@@ -277,16 +213,28 @@ class _AuditScreenState extends State<AuditScreen> {
         ? Uri.parse('whatsapp://send?phone=$phoneParam&text=$enc')
         : Uri.parse('whatsapp://send?text=$enc');
 
+    final waMeUri = phoneParam.isNotEmpty
+        ? Uri.parse('https://wa.me/$phoneParam?text=$enc')
+        : Uri.parse('https://wa.me/?text=$enc');
+
     final webUri = phoneParam.isNotEmpty
         ? Uri.parse('https://api.whatsapp.com/send?phone=$phoneParam&text=$enc')
         : Uri.parse('https://api.whatsapp.com/send?text=$enc');
 
     try {
       if (!await launchUrl(appUri, mode: LaunchMode.externalApplication)) {
-        await launchUrl(webUri, mode: LaunchMode.externalApplication);
+        if (!await launchUrl(waMeUri, mode: LaunchMode.externalApplication)) {
+          await launchUrl(webUri, mode: LaunchMode.externalApplication);
+        }
       }
     } catch (_) {
-      await launchUrl(webUri, mode: LaunchMode.externalApplication);
+      try {
+        if (!await launchUrl(waMeUri, mode: LaunchMode.externalApplication)) {
+          await launchUrl(webUri, mode: LaunchMode.externalApplication);
+        }
+      } catch (_) {
+        await launchUrl(webUri, mode: LaunchMode.externalApplication);
+      }
     }
   }
 
@@ -312,9 +260,7 @@ class _AuditScreenState extends State<AuditScreen> {
         try {
           final f = File(p);
           if (await f.exists()) {
-            b64List.add(
-              'data:image/jpeg;base64,${base64Encode(await f.readAsBytes())}',
-            );
+            b64List.add('data:image/jpeg;base64,${base64Encode(await f.readAsBytes())}');
           }
         } catch (_) {}
       }
@@ -332,9 +278,7 @@ class _AuditScreenState extends State<AuditScreen> {
         _errorMessage = '';
       });
       final res = await http.post(
-        Uri.parse(
-          '${ApiService.baseUrl}/audit/visits/${widget.visitId}/submit',
-        ),
+        Uri.parse('${ApiService.baseUrl}/audit/visits/${widget.visitId}/submit'),
         headers: {
           'Authorization': 'Bearer ${widget.accessToken}',
           'Content-Type': 'application/json',
@@ -404,8 +348,7 @@ class _AuditScreenState extends State<AuditScreen> {
   Widget _buildQuestionCard(Map<String, dynamic> question, int index) {
     final qId = question['id']?.toString() ?? '';
     final displayNo = '${index + 1}';
-    final text =
-        question['question']?.toString() ?? question['text']?.toString() ?? '';
+    final text = question['question']?.toString() ?? question['text']?.toString() ?? '';
     final selected = _answers[qId];
     final reqPhoto = _isPhotoRequired(question);
     final paths = _questionPhotos[qId] ?? [];
@@ -417,9 +360,7 @@ class _AuditScreenState extends State<AuditScreen> {
         color: Colors.white,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
-          color: selected != null
-              ? const Color(0xFFC7D7FE)
-              : const Color(0xFFE4E7EC),
+          color: selected != null ? const Color(0xFFC7D7FE) : const Color(0xFFE4E7EC),
           width: selected != null ? 1.5 : 1,
         ),
       ),
@@ -446,10 +387,7 @@ class _AuditScreenState extends State<AuditScreen> {
               const SizedBox(width: 8),
               if (reqPhoto || selected == true || paths.isNotEmpty)
                 Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 4,
-                  ),
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   decoration: BoxDecoration(
                     color: paths.isNotEmpty
                         ? const Color(0xFFECFDF5)
@@ -457,9 +395,7 @@ class _AuditScreenState extends State<AuditScreen> {
                     borderRadius: BorderRadius.circular(6),
                   ),
                   child: Text(
-                    paths.isNotEmpty
-                        ? '${paths.length} Photo(s) Attached'
-                        : 'Attach Photo',
+                    paths.isNotEmpty ? '${paths.length} Photo(s) Attached' : 'Attach Photo',
                     style: TextStyle(
                       fontSize: 11,
                       fontWeight: FontWeight.w600,
@@ -510,11 +446,7 @@ class _AuditScreenState extends State<AuditScreen> {
                                 color: Colors.red,
                                 shape: BoxShape.circle,
                               ),
-                              child: const Icon(
-                                Icons.close,
-                                size: 12,
-                                color: Colors.white,
-                              ),
+                              child: const Icon(Icons.close, size: 12, color: Colors.white),
                             ),
                           ),
                         ),
@@ -533,11 +465,7 @@ class _AuditScreenState extends State<AuditScreen> {
                       child: const Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Icon(
-                            Icons.add_a_photo,
-                            size: 20,
-                            color: Color(0xFF2563EB),
-                          ),
+                          Icon(Icons.add_a_photo, size: 20, color: Color(0xFF2563EB)),
                           SizedBox(height: 3),
                           Text(
                             '+ Add',
@@ -556,11 +484,7 @@ class _AuditScreenState extends State<AuditScreen> {
             else
               OutlinedButton.icon(
                 onPressed: () => _capturePhoto(qId, text),
-                icon: const Icon(
-                  Icons.camera_alt,
-                  size: 16,
-                  color: Color(0xFF2563EB),
-                ),
+                icon: const Icon(Icons.camera_alt, size: 16, color: Color(0xFF2563EB)),
                 label: const Text(
                   'Capture Photo',
                   style: TextStyle(color: Color(0xFF2563EB), fontSize: 13),
@@ -576,22 +500,17 @@ class _AuditScreenState extends State<AuditScreen> {
                       ? null
                       : () => _selectAnswer(question, true),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: selected == true
-                        ? const Color(0xFF16A34A)
-                        : Colors.white,
-                    foregroundColor: selected == true
-                        ? Colors.white
-                        : const Color(0xFF374151),
+                    backgroundColor:
+                        selected == true ? const Color(0xFF16A34A) : Colors.white,
+                    foregroundColor:
+                        selected == true ? Colors.white : const Color(0xFF374151),
                     side: BorderSide(
                       color: selected == true
                           ? const Color(0xFF16A34A)
                           : const Color(0xFFD1D5DB),
                     ),
                   ),
-                  child: const Text(
-                    'YES',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
+                  child: const Text('YES', style: TextStyle(fontWeight: FontWeight.bold)),
                 ),
               ),
               const SizedBox(width: 12),
@@ -601,22 +520,17 @@ class _AuditScreenState extends State<AuditScreen> {
                       ? null
                       : () => _selectAnswer(question, false),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: selected == false
-                        ? const Color(0xFFDC2626)
-                        : Colors.white,
-                    foregroundColor: selected == false
-                        ? Colors.white
-                        : const Color(0xFF374151),
+                    backgroundColor:
+                        selected == false ? const Color(0xFFDC2626) : Colors.white,
+                    foregroundColor:
+                        selected == false ? Colors.white : const Color(0xFF374151),
                     side: BorderSide(
                       color: selected == false
                           ? const Color(0xFFDC2626)
                           : const Color(0xFFD1D5DB),
                     ),
                   ),
-                  child: const Text(
-                    'NO',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
+                  child: const Text('NO', style: TextStyle(fontWeight: FontWeight.bold)),
                 ),
               ),
             ],
@@ -637,10 +551,7 @@ class _AuditScreenState extends State<AuditScreen> {
       appBar: AppBar(
         backgroundColor: const Color(0xFF1E3A8A),
         foregroundColor: Colors.white,
-        title: Text(
-          widget.title,
-          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
-        ),
+        title: Text(widget.title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
@@ -662,8 +573,7 @@ class _AuditScreenState extends State<AuditScreen> {
                           child: Column(
                             children: [
                               Row(
-                                mainAxisAlignment:
-                                    MainAxisAlignment.spaceBetween,
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                 children: [
                                   Text(
                                     'Progress: $answered / $total Completed',
@@ -693,10 +603,7 @@ class _AuditScreenState extends State<AuditScreen> {
                         ),
                         if (_errorMessage.isNotEmpty)
                           Container(
-                            margin: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 6,
-                            ),
+                            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
                             padding: const EdgeInsets.all(10),
                             decoration: BoxDecoration(
                               color: const Color(0xFFFEF2F2),
@@ -704,10 +611,7 @@ class _AuditScreenState extends State<AuditScreen> {
                             ),
                             child: Text(
                               _errorMessage,
-                              style: const TextStyle(
-                                color: Color(0xFFB91C1C),
-                                fontSize: 13,
-                              ),
+                              style: const TextStyle(color: Color(0xFFB91C1C), fontSize: 13),
                             ),
                           ),
                         for (int i = 0; i < _questions.length; i++)
@@ -725,9 +629,7 @@ class _AuditScreenState extends State<AuditScreen> {
                       height: 50,
                       width: double.infinity,
                       child: ElevatedButton(
-                        onPressed: (_submitting || _submitted)
-                            ? null
-                            : _submitAudit,
+                        onPressed: (_submitting || _submitted) ? null : _submitAudit,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: const Color(0xFF2563EB),
                           foregroundColor: Colors.white,

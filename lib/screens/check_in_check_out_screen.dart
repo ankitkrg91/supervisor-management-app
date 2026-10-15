@@ -318,10 +318,13 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
   }
 
   // ============================================================
-  // DIRECT CHECK-IN (GPS ONLY, NO CAMERA POPUP)
+  // CHECK-IN (STANDARD OR ALTERNATE/RAIN)
   // ============================================================
 
-  Future<void> _checkIn() async {
+  Future<void> _checkIn({
+    bool isAlternate = false,
+    String? alternateReason,
+  }) async {
     if (_processing) {
       return;
     }
@@ -341,29 +344,39 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
 
       final position = await _getCurrentLocation();
 
-      // Enforce 100-meter geofence if site coordinates are provided
-      final targetLat = widget.taskSiteLatitude;
-      final targetLng = widget.taskSiteLongitude;
+      // Enforce 100-meter geofence ONLY if NOT in Alternate/Rain mode
+      if (!isAlternate) {
+        double? targetLat = widget.taskSiteLatitude;
+        double? targetLng = widget.taskSiteLongitude;
 
-      if (targetLat != null && targetLng != null) {
-        final distanceMeters = Geolocator.distanceBetween(
-          position.latitude,
-          position.longitude,
-          targetLat,
-          targetLng,
-        );
+        if (targetLat == null || targetLng == null) {
+          final s = widget.user['site'] ?? _activeCheckIn?['site'];
+          if (s is Map) {
+            targetLat = (s['latitude'] as num?)?.toDouble();
+            targetLng = (s['longitude'] as num?)?.toDouble();
+          }
+        }
 
-        if (distanceMeters > 100) {
-          final roundedDist = distanceMeters.round();
-          final siteName = _taskSiteName();
-          setState(() {
-            _processing = false;
-          });
-          _showMessage(
-            "Check-in is only allowed within 100 meters of the site. You are currently ${roundedDist}m away from $siteName.",
-            isError: true,
+        if (targetLat != null && targetLng != null) {
+          final distanceMeters = Geolocator.distanceBetween(
+            position.latitude,
+            position.longitude,
+            targetLat,
+            targetLng,
           );
-          return;
+
+          if (distanceMeters > 100) {
+            final roundedDist = distanceMeters.round();
+            final siteName = _taskSiteName();
+            setState(() {
+              _processing = false;
+            });
+            _showMessage(
+              "You are ${roundedDist}m away from $siteName. Standard Check-In strictly requires being within 100m.\n\n👉 If you cannot reach the site due to rain or emergency, please tap 'Rain / Weather Emergency Check-In'.",
+              isError: true,
+            );
+            return;
+          }
         }
       }
 
@@ -372,6 +385,8 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
         siteId: siteId,
         latitude: position.latitude,
         longitude: position.longitude,
+        isAlternate: isAlternate,
+        alternateReason: alternateReason,
       );
 
       final data = response['data'];
@@ -397,7 +412,10 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
       }
 
       _showMessage(
-        response['message'] ?? 'Check-in successful!',
+        response['message'] ??
+            (isAlternate
+                ? 'Rain/Emergency Check-in successful!'
+                : 'Check-in successful!'),
         isError: false,
       );
     } catch (e) {
@@ -410,6 +428,171 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
       });
 
       _showMessage(e.toString().replaceFirst('Exception: ', ''), isError: true);
+    }
+  }
+
+  // ============================================================
+  // ALTERNATE / RAIN EMERGENCY MODAL DIALOG
+  // ============================================================
+
+  Future<void> _showAlternateCheckInDialog() async {
+    String selectedReason = '🌧️ Heavy Rain / Waterlogging';
+    final customController = TextEditingController();
+
+    final confirmed = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            final reasons = [
+              '🌧️ Heavy Rain / Waterlogging',
+              '⚡ Severe Storm / Extreme Weather',
+              '🚫 Road Blockage / Flooding',
+              '🚗 Transport / Vehicle Breakdown',
+              '🏢 Client Office Closed / Inaccessible',
+              '📝 Other Emergency Reason',
+            ];
+
+            return Padding(
+              padding: EdgeInsets.only(
+                left: 20,
+                right: 20,
+                top: 20,
+                bottom: MediaQuery.of(context).viewInsets.bottom + 20,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFEF3C7),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: const Icon(
+                          Icons.thunderstorm_outlined,
+                          color: Color(0xFFD97706),
+                          size: 24,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Rain / Emergency Check-In',
+                              style: TextStyle(
+                                fontSize: 17,
+                                fontWeight: FontWeight.w800,
+                                color: Color(0xFF111827),
+                              ),
+                            ),
+                            Text(
+                              'Bypasses 100m geofence with GPS stamp',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Color(0xFF6B7280),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Select Emergency Reason:',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF374151),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  ...reasons.map(
+                    (r) => RadioListTile<String>(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      value: r,
+                      groupValue: selectedReason,
+                      activeColor: const Color(0xFFD97706),
+                      title: Text(
+                        r,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      onChanged: (val) {
+                        if (val != null) {
+                          setModalState(() => selectedReason = val);
+                        }
+                      },
+                    ),
+                  ),
+                  if (selectedReason == '📝 Other Emergency Reason') ...[
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: customController,
+                      decoration: InputDecoration(
+                        hintText: 'Enter reason for remote check-in...',
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 20),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: ElevatedButton(
+                      onPressed: () {
+                        if (selectedReason == '📝 Other Emergency Reason' &&
+                            customController.text.trim().isNotEmpty) {
+                          selectedReason = customController.text.trim();
+                        }
+                        Navigator.of(ctx).pop(true);
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFD97706),
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      child: const Text(
+                        'Confirm & Check In (Bypass Geofence)',
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+
+    if (confirmed == true) {
+      _checkIn(isAlternate: true, alternateReason: selectedReason);
     }
   }
 
@@ -432,15 +615,11 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
     final checkInId = checkIn['id']?.toString().trim() ?? '';
 
     if (checkInId.isEmpty) {
-      _showMessage('Active check-in record is invalid.', isError: true);
+      _showMessage('Invalid active check-in record.', isError: true);
       return;
     }
 
     try {
-      if (!mounted) {
-        return;
-      }
-
       setState(() {
         _processing = true;
         _error = '';
@@ -557,6 +736,10 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
     final displayedSiteName = _taskSiteName();
     final displayedSiteCode = _taskSiteCode();
 
+    final isAlternateMode =
+        _activeCheckIn?['isAlternate'] == true ||
+        _activeCheckIn?['alternateReason'] != null;
+
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(20),
@@ -579,7 +762,9 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
             height: 72,
             decoration: BoxDecoration(
               color: checkedIn
-                  ? const Color(0xFFDCFCE7)
+                  ? (isAlternateMode
+                        ? const Color(0xFFFEF3C7)
+                        : const Color(0xFFDCFCE7))
                   : const Color(0xFFEFF6FF),
               shape: BoxShape.circle,
             ),
@@ -596,11 +781,15 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
                   )
                 : Icon(
                     checkedIn
-                        ? Icons.check_circle_outline
+                        ? (isAlternateMode
+                              ? Icons.cloudy_snowing
+                              : Icons.check_circle_outline)
                         : Icons.login_rounded,
                     size: 38,
                     color: checkedIn
-                        ? const Color(0xFF16A34A)
+                        ? (isAlternateMode
+                              ? const Color(0xFFD97706)
+                              : const Color(0xFF16A34A))
                         : const Color(0xFF2563EB),
                   ),
           ),
@@ -611,7 +800,9 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
             _attendanceLoading
                 ? 'Checking Attendance...'
                 : checkedIn
-                ? 'You are Checked In'
+                ? (isAlternateMode
+                      ? 'Checked In (Rain/Emergency)'
+                      : 'You are Checked In')
                 : 'You are Not Checked In',
             style: const TextStyle(
               fontSize: 20,
@@ -626,8 +817,10 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
             _attendanceLoading
                 ? 'Checking your current check-in status.'
                 : checkedIn
-                ? 'Your attendance is active for this task site.'
-                : 'Check in before starting your field work.',
+                ? (isAlternateMode
+                      ? 'Attendance active via Weather Exception (${_activeCheckIn?['alternateReason'] ?? "Emergency"}).'
+                      : 'Your attendance is active for this task site.')
+                : 'Check in on-site (within 100m) or use Rain Check-In if unable to reach site.',
             textAlign: TextAlign.center,
             style: const TextStyle(fontSize: 13, color: Color(0xFF6B7280)),
           ),
@@ -662,6 +855,15 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
                     _formatDateTime(_activeCheckIn?['checkInAt']),
                   ),
                 ],
+
+                if (checkedIn && isAlternateMode) ...[
+                  const SizedBox(height: 10),
+                  _infoRow(
+                    Icons.thunderstorm_outlined,
+                    'Check-in Mode',
+                    '🌧️ Rain / Weather Exception',
+                  ),
+                ],
               ],
             ),
           ),
@@ -670,18 +872,21 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
     );
   }
 
-  Widget _infoRow(IconData icon, String title, String value) {
+  Widget _infoRow(IconData icon, String label, String value) {
     return Row(
       children: [
-        Icon(icon, size: 19, color: const Color(0xFF6B7280)),
-        const SizedBox(width: 9),
-        Expanded(
-          child: Text(
-            title,
-            style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+        Icon(icon, size: 18, color: const Color(0xFF6B7280)),
+        const SizedBox(width: 8),
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 13,
+            color: Color(0xFF4B5563),
+            fontWeight: FontWeight.w500,
           ),
         ),
-        Flexible(
+        const Spacer(),
+        Expanded(
           child: Text(
             value,
             textAlign: TextAlign.right,
@@ -708,7 +913,7 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
             ? null
             : checkedIn
             ? _checkOut
-            : _checkIn,
+            : () => _checkIn(isAlternate: false),
         icon: disabled
             ? const SizedBox(
                 width: 20,
@@ -718,7 +923,9 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
                   color: Colors.white,
                 ),
               )
-            : Icon(checkedIn ? Icons.logout_rounded : Icons.login_rounded),
+            : Icon(
+                checkedIn ? Icons.logout_rounded : Icons.location_on_rounded,
+              ),
         label: Text(
           _attendanceLoading
               ? 'Checking...'
@@ -726,8 +933,8 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
               ? 'Please wait...'
               : checkedIn
               ? 'Check Out'
-              : 'Check In',
-          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+              : 'Standard Check In (Within 100m)',
+          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
         ),
         style: ElevatedButton.styleFrom(
           backgroundColor: checkedIn
@@ -736,6 +943,43 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
           foregroundColor: Colors.white,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(14),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _alternateActionButton() {
+    final checkedIn = _activeCheckIn != null;
+    if (checkedIn) return const SizedBox.shrink();
+
+    final disabled = _processing || _attendanceLoading;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: SizedBox(
+        width: double.infinity,
+        height: 50,
+        child: OutlinedButton.icon(
+          onPressed: disabled ? null : _showAlternateCheckInDialog,
+          icon: const Icon(
+            Icons.thunderstorm_outlined,
+            color: Color(0xFFD97706),
+            size: 20,
+          ),
+          label: const Text(
+            '🌧️ Rain / Weather Emergency Check-In',
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFFD97706),
+            ),
+          ),
+          style: OutlinedButton.styleFrom(
+            side: const BorderSide(color: Color(0xFFF59E0B), width: 1.5),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+            ),
           ),
         ),
       ),
@@ -770,6 +1014,7 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
               _statusCard(),
               const SizedBox(height: 18),
               _actionButton(),
+              _alternateActionButton(),
               if (_error.isNotEmpty) ...[
                 const SizedBox(height: 16),
                 Container(
@@ -782,45 +1027,14 @@ class _CheckInCheckOutScreenState extends State<CheckInCheckOutScreen> {
                   ),
                   child: Text(
                     _error,
-                    textAlign: TextAlign.center,
                     style: const TextStyle(
                       color: Color(0xFFB91C1C),
-                      fontSize: 12,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
                 ),
               ],
-              const SizedBox(height: 18),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(15),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: const Color(0xFFE5E7EB)),
-                ),
-                child: const Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(
-                      Icons.location_on_outlined,
-                      size: 20,
-                      color: Color(0xFF2563EB),
-                    ),
-                    SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        'Your current GPS location is captured during check-in and check-out.',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Color(0xFF6B7280),
-                          height: 1.4,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
             ],
           ),
         ),
