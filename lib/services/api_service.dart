@@ -7,7 +7,9 @@ class ApiService {
   // ENVIRONMENT CONFIGURATION (LOCAL TESTING SWITCH)
   // ============================================================
   // Set isLocalTest = true for local testing, false for live Render.
-  static const bool isLocalTest = true;
+// 1. isLocalTest ko FALSE karein:
+// isLocalTest ko false karein taaki live Render server connect ho:
+  static const bool isLocalTest = false;
 
   static const String _localUrl = 'http://10.250.21.234:5000/api';
   static const String _liveUrl =
